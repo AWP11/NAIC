@@ -1,1 +1,1 @@
-# HAYA
+NAIС С AI CORE
