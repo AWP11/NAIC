@@ -8,14 +8,43 @@
 #endif
 
 // =============== ОБЩИЕ ФОРМУЛЫ ===============
+// ЗАМЕНИТЕ существующую fractal_connectivity на эту:
 float fractal_connectivity(float dimension, float intensity, int depth) {
-    return (dimension * intensity) / (1.0f + logf(1.0f + depth));
+    // Биологически оптимальные диапазоны из PDF (1.7-1.9)
+    float biological_boost = 1.0f;
+    if (dimension > 1.7f && dimension < 1.9f) {
+        biological_boost = 1.3f; // +30% эффективности в оптимальном диапазоне
+    }
+    
+    // Основа из вашего текущего кода
+    float base = (dimension * intensity) / (1.0f + logf(1.0f + depth));
+    
+    return base * biological_boost;
 }
 
 float resonance_amplification(float base, float harmonic, float resonance) {
-    return base * (1.0f + harmonic * resonance);
+    // Базовая формула (сохраняем вашу текущую логику)
+    float base_amplification = base * (1.0f + harmonic * resonance);
+    
+    // Добавляем умеренный стохастический резонанс из PDF
+    // Оптимальный шум для усиления слабых, но значимых сигналов
+    float optimal_noise = 0.0f;
+    
+    // Стохастический резонанс наиболее эффективен для средних уровней активации
+    if (base > 0.2f && base < 0.8f) {
+        optimal_noise = 0.015f; // Очень умеренный шум
+    }
+    
+    float noise = ((float)rand() / RAND_MAX - 0.5f) * optimal_noise;
+    
+    // Принцип квантового дарвинизма - усиление устойчивых состояний
+    float stability_boost = 1.0f;
+    if (harmonic > 0.6f && resonance > 0.6f) {
+        stability_boost = 1.15f; // +15% для высоко согласованных состояний
+    }
+    
+    return base_amplification * stability_boost + noise;
 }
-
 // =============== МЕТАФОРМУЛЫ ===============
 float adaptive_learning_rate(float current_rate, float performance, float stability) {
     float adaptive = current_rate * (1.0f + tanhf(performance * 2.0f - 1.0f));
