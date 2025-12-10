@@ -842,79 +842,200 @@ void add_spike_to_hierarchy(HierarchicalSpikeSystem* system, FractalSpike* spike
     }
 }
 
-float propagate_through_hierarchy(HierarchicalSpikeSystem* system, FractalSpike* input_spike) {
+float propagate_through_hierarchy_with_resonance(HierarchicalSpikeSystem* system, FractalSpike* input_spike, NeuralResonance* resonance) {
     if (!system || !input_spike) return 0.0f;
 
     float total_activation = 0.0f;
+    long current_time = time(NULL);
+    float time_delta = 1.0f; // Базовая дельта времени
 
-    // Propagate Low -> Mid
+    // Резонансный контекст для всей системы
+    float system_resonance = 0.0f;
+    if (resonance) {
+        system_resonance = apply_resonance(resonance, 0.5f, time_delta);
+    }
+
+    // ===== Propagate Low -> Mid с резонансом =====
     for (int i = 0; i < system->low_level_count; i++) {
         FractalSpike* low_spike = system->low_level_spikes[i];
         if (!low_spike) continue;
 
+        // Базовое кэширование
         float cached_activation = low_spike->intensity;
         if (system->cache) {
-            FractalHashEntry* entry = hash_cache_lookup(system->cache, low_spike->source, low_spike->fractalDimension, low_spike->intensity);
+            FractalHashEntry* entry = hash_cache_lookup(system->cache, 
+                low_spike->source, low_spike->fractalDimension, low_spike->intensity);
             if (entry) {
                 cached_activation = entry->cached_activation;
             }
         }
 
+        // Применяем резонанс к кэшированной активации
+        float resonant_activation = cached_activation;
+        if (resonance && system_resonance > 0.1f) {
+            resonant_activation = apply_resonance(resonance, cached_activation, time_delta);
+            CLAMP(resonant_activation);
+        }
+
+        // Нейромодуляция на основе времени жизни спайка
+        float temporal_decay = 1.0f - fminf(0.5f, (float)(current_time - low_spike->timestamp) / 3600.0f);
+        
         for (int j = 0; j < system->mid_level_count; j++) {
             if (system->mid_level_spikes[j]) {
                 int weight_index = i * system->max_mid_spikes + j;
                 float weight = system->low_to_mid_weights[weight_index];
-                float activation = cached_activation * weight;
-                system->mid_level_spikes[j]->intensity += activation * 0.1f;
+                
+                // === РЕЗОНАНСНАЯ МОДУЛЯЦИЯ ВЕСА ===
+                float resonance_factor = 1.0f;
+                if (resonance) {
+                    // Вес модулируется фазой резонанса
+                    float phase_modulation = sinf(resonance->phase) * 0.2f + 1.0f;
+                    resonance_factor *= phase_modulation;
+                    
+                    // Амплитуда резонанса усиливает связи
+                    resonance_factor *= (1.0f + resonance->amplitude * 0.3f);
+                }
+                
+                float modulated_weight = weight * resonance_factor * temporal_decay;
+                CLAMP(modulated_weight);
+                
+                // Активация с резонансным усилением
+                float activation = resonant_activation * modulated_weight;
+                
+                // РЕЗОНАНСНОЕ НАКОПЛЕНИЕ вместо простого сложения
+                float resonance_amplification = 1.0f;
+                if (resonance) {
+                    float sin_phase = sinf(resonance->phase);
+                    if (fabsf(sin_phase) > 0.7f) {
+                        // Фаза пика резонанса дает дополнительное усиление
+                        resonance_amplification = 1.5f;
+                    }
+                }
+                
+                system->mid_level_spikes[j]->intensity += activation * resonance_amplification;
                 CLAMP(system->mid_level_spikes[j]->intensity);
-                total_activation += activation;
+                
+                // РЕЗОНАНСНАЯ АКТИВАЦИЯ: учитываем гармоники
+                total_activation += activation * (1.0f + resonance_amplification * 0.5f);
             }
         }
     }
 
-    // Propagate Mid -> High
+    // ===== Propagate Mid -> High с фрактальной резонансностью =====
     for (int i = 0; i < system->mid_level_count; i++) {
         FractalSpike* mid_spike = system->mid_level_spikes[i];
-        if (!mid_spike) continue;
+        if (!mid_spike || mid_spike->intensity < 0.1f) continue;
 
         float cached_activation = mid_spike->intensity;
         if (system->cache) {
-            FractalHashEntry* entry = hash_cache_lookup(system->cache, mid_spike->source, mid_spike->fractalDimension, mid_spike->intensity);
+            FractalHashEntry* entry = hash_cache_lookup(system->cache, 
+                mid_spike->source, mid_spike->fractalDimension, mid_spike->intensity);
             if (entry) {
                 cached_activation = entry->cached_activation;
             }
+        }
+
+        // Фрактально-резонансная модуляция для среднего уровня
+        float fractal_resonance = 1.0f;
+        if (mid_spike->fractalDimension > 1.5f && resonance) {
+            // Высокая фрактальная размерность усиливает резонанс
+            float fractal_factor = (mid_spike->fractalDimension - 1.5f) * 0.5f;
+            fractal_resonance = apply_resonance(resonance, fractal_factor, time_delta);
+            CLAMP(fractal_resonance);
         }
 
         for (int j = 0; j < system->high_level_count; j++) {
             if (system->high_level_spikes[j]) {
                 int weight_index = i * system->max_high_spikes + j;
                 float weight = system->mid_to_high_weights[weight_index];
-                float activation = cached_activation * weight;
-                system->high_level_spikes[j]->intensity += activation * 0.05f;
+                
+                // Вес модулируется фрактальной размерностью и резонансом
+                float weight_modulation = 1.0f + 
+                    (mid_spike->fractalDimension - 1.0f) * 0.2f + 
+                    (resonance ? resonance->amplitude * 0.1f : 0.0f);
+                
+                float modulated_weight = weight * weight_modulation * fractal_resonance;
+                CLAMP(modulated_weight);
+                
+                float activation = cached_activation * modulated_weight;
+                
+                // РЕЗОНАНСНЫЙ СИНХРОННЫЙ ПИК: если фаза совпадает с оптимальной
+                float sync_boost = 1.0f;
+                if (resonance) {
+                    float fmod_phase = fmodf(resonance->phase, M_PI/2.0f);
+                    if (fabsf(fmod_phase) < 0.1f) {
+                        sync_boost = 2.0f; // Синхронный пик дает удвоение
+                    }
+                }
+                
+                system->high_level_spikes[j]->intensity += activation * sync_boost;
                 CLAMP(system->high_level_spikes[j]->intensity);
-                total_activation += activation;
+                
+                // ФРАКТАЛЬНО-РЕЗОНАНСНАЯ АКТИВАЦИЯ
+                total_activation += activation * 
+                    (1.0f + (mid_spike->fractalDimension - 1.0f) * 0.3f) * 
+                    sync_boost;
             }
         }
     }
 
-    // Propagate High -> Mid (feedback)
+    // ===== Propagate High -> Mid (резонансная обратная связь) =====
     for (int i = 0; i < system->high_level_count; i++) {
         FractalSpike* high_spike = system->high_level_spikes[i];
-        if (!high_spike || high_spike->intensity < 0.3f) continue; // Only strong high-level spikes feedback
+        if (!high_spike || high_spike->intensity < 0.3f) continue;
 
-        float feedback_strength = high_spike->intensity * 0.2f;
+        // РЕЗОНАНСНОЕ УСИЛЕНИЕ ОБРАТНОЙ СВЯЗИ
+        float feedback_resonance = 1.0f;
+        if (resonance) {
+            // Обратная связь усиливается при определенных фазах
+            float phase_feedback = cosf(resonance->phase * 2.0f) * 0.3f + 1.0f;
+            feedback_resonance = phase_feedback * (1.0f + resonance->amplitude * 0.4f);
+        }
+        
+        float feedback_strength = high_spike->intensity * 0.2f * feedback_resonance;
+
         for (int j = 0; j < system->mid_level_count; j++) {
             if (system->mid_level_spikes[j]) {
                 int weight_index = i * system->max_mid_spikes + j;
                 float weight = system->high_to_mid_weights[weight_index];
-                float feedback = feedback_strength * weight;
+                
+                // Модуляция веса обратной связи
+                float feedback_modulation = 1.0f + 
+                    (high_spike->fractalDimension - 1.0f) * 0.1f;
+                
+                float modulated_weight = weight * feedback_modulation;
+                float feedback = feedback_strength * modulated_weight;
+                
                 system->mid_level_spikes[j]->intensity += feedback;
                 CLAMP(system->mid_level_spikes[j]->intensity);
-                total_activation += feedback;
+                
+                // ОБРАТНО-РЕЗОНАНСНАЯ АКТИВАЦИЯ
+                total_activation += feedback * feedback_resonance;
             }
         }
     }
 
+    // ===== ГЛОБАЛЬНЫЙ РЕЗОНАНС СИСТЕМЫ =====
+    if (resonance && total_activation > 0.1f) {
+        // Общая активация модулируется глобальным резонансом
+        float global_resonance_modulation = 1.0f + resonance->amplitude * 0.5f;
+        
+        // Фазовое согласование усиливает общий эффект
+        float sin_phase_triple = sinf(resonance->phase * 3.0f);
+        if (fabsf(sin_phase_triple) < 0.1f) {
+            global_resonance_modulation *= 1.3f; // Гармонический резонанс
+        }
+        
+        total_activation *= global_resonance_modulation;
+        
+        // Обновление параметров резонанса на основе активации системы
+        float learning_signal = fminf(0.1f, total_activation * 0.05f);
+        update_resonance_parameters(resonance, learning_signal);
+    }
+
+    // Нормализация и ограничение
+    total_activation = fminf(10.0f, total_activation); // Предотвращаем взрывной рост
+    
     return total_activation;
 }
 
@@ -1420,7 +1541,7 @@ void fractal_online_learning(FractalHashCache* cache, NeuralResonance* resonance
     float sign_error = (error >= 0.0f) ? 1.0f : -1.0f;
 
     float base_lr = 0.01f;
-    float optimal_fractal_dim = 1.4f;
+    float optimal_fractal_dim = 1.1f;
     float dim_deviation = fabsf(dimension - optimal_fractal_dim);
     float dim_factor = 1.0f / (1.0f + dim_deviation * 2.0f); // Снижение lr при отклонении от оптимума
     float adaptive_lr = base_lr * dim_factor;
@@ -1472,4 +1593,8 @@ void apply_resonance_to_activation(FractalActivation* act, NeuralResonance* reso
     CLAMP(act->baseActivation);
     CLAMP(act->harmonicActivation);
     CLAMP(act->spikeResonance);
+}
+
+float propagate_through_hierarchy(HierarchicalSpikeSystem* system, FractalSpike* input_spike) {
+    return propagate_through_hierarchy_with_resonance(system, input_spike, NULL);
 }
