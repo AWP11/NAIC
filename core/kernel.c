@@ -8,18 +8,42 @@
 #include <fractal_tensor.h>
 
 // === ПЛАВНОЕ ЗАБЫВАНИЕ НЕЙРОНОВ ===
-
+NeuralResonance* global_resonance = NULL;
 void update_neuron_importance(NeuralMemory* memory) {
     if (!memory || memory->count == 0) return;
     long current_time = time(NULL);
 
+    // Предположим: внешний контекст доступен через global_resonance (можно передавать как аргумент)
+    extern NeuralResonance* global_resonance; // или передавать в функцию
+    // или временно: просто используем статический/кэшированный фазовый контекст
+
     for (int i = 0; i < memory->count; i++) {
         if (memory->neurons[i]) {
-            float importance = calculate_neuron_importance(memory->neurons[i], current_time);
-            // В простейшем случае, importance может быть просто intensity
-            // В более сложных, это может быть функция intensity, fractalDimension, времени и др.
-            // Для совместимости, обновляем intensity как "рабочую" важность
-            memory->neurons[i]->intensity = importance;
+            FractalSpike* n = memory->neurons[i];
+
+            // === АЛБ-расширения (2 строки + коррекция) ===
+            float resonance_match = 1.0f;
+            if (global_resonance) {
+                // временно приравняем spike к осциллятору с частотой ~ dimension, амплитудой ~ intensity
+                NeuralResonance spike_res = { 
+                    .frequency = 0.5f + n->fractalDimension * 0.2f,
+                    .amplitude = n->intensity,
+                    .damping = 0.05f 
+                };
+                resonance_match = calculate_resonance_match(&spike_res, global_resonance);
+            }
+
+            float metabolic_penalty = fabsf(
+                energy_balance(n->pathSize > 0 ? n->pathSize : 1, n->intensity, 0.8f)
+            );
+            float metabolic_survival = fmaxf(0.05f, 1.0f - metabolic_penalty);
+
+            // === Основное вычисление важности + АЛБ-модуляция ===
+            float base_importance = calculate_neuron_importance(n, current_time);
+            float importance = base_importance * resonance_match * metabolic_survival;
+
+            CLAMP(importance);
+            n->intensity = importance;  // обновляем рабочую важность
         }
     }
 }
@@ -540,32 +564,7 @@ void optimize_hash_energy(FractalHashCache* cache, float target_efficiency) {
     }
 }
 
-void hash_cache_clusterize(FractalHashCache* cache, float similarity_threshold) {
-    if (!cache) return;
 
-    for (int i = 0; i < cache->capacity; i++) {
-        FractalHashEntry* entry_i = cache->entries[i];
-        if (!entry_i) continue;
-
-        for (int j = i + 1; j < cache->capacity; j++) {
-            FractalHashEntry* entry_j = cache->entries[j];
-            if (!entry_j) continue;
-
-            float dim_diff = fabsf(entry_i->fractal_dimension - entry_j->fractal_dimension);
-            float act_diff = fabsf(entry_i->cached_activation - entry_j->cached_activation);
-
-            if (dim_diff < similarity_threshold && act_diff < 0.2f) {
-                entry_i->is_cluster_representative = 1;
-                entry_i->cluster_radius = fmaxf(dim_diff, act_diff);
-                // Удаляем entry_j как дубликат
-                free(entry_j->pattern_hash);
-                free(entry_j);
-                cache->entries[j] = NULL;
-                cache->size--;
-            }
-        }
-    }
-}
 
 FractalHashEntry* find_closest_representative(FractalHashCache* cache, float dimension, float intensity) {
     if (!cache) return NULL;
@@ -1584,15 +1583,46 @@ void fractal_online_learning(FractalHashCache* cache, NeuralResonance* resonance
     }
 }
 
-void apply_resonance_to_activation(FractalActivation* act, NeuralResonance* resonance) {
+void apply_resonance_to_activation(FractalActivation* act, NeuralResonance* resonance, _Float16 stability_factor) {
     if (!act || !resonance) return;
 
-    act->baseActivation *= resonance->amplitude;
-    act->harmonicActivation *= resonance->frequency;
-    act->spikeResonance *= (1.0f - resonance->damping);
-    CLAMP(act->baseActivation);
-    CLAMP(act->harmonicActivation);
-    CLAMP(act->spikeResonance);
+    // Статические переменные для EMA - объявляем как static для сохранения между вызовами
+    static float prev_base = 0.5f, prev_harmonic = 0.5f, prev_resonance = 0.5f;
+    float alpha = 0.3f; // Коэффициент сглаживания
+    
+    // Ограничиваем изменения резонансных параметров
+    float clamped_amplitude = fmaxf(0.1f, fminf(2.0f, resonance->amplitude));
+    float clamped_frequency = fmaxf(0.01f, fminf(5.0f, resonance->frequency));
+    float clamped_damping = fmaxf(0.01f, fminf(0.9f, resonance->damping));
+    
+    // Применяем резонанс с защитой от экстремальных значений
+    float new_base = act->baseActivation * clamped_amplitude;
+    float new_harmonic = act->harmonicActivation * clamped_frequency;
+    float new_resonance = act->spikeResonance * (1.0f - clamped_damping);
+    
+    // Стабилизируем через EMA и стабильностный фактор
+    act->baseActivation = alpha * new_base + (1.0f - alpha) * prev_base;
+    act->harmonicActivation = alpha * new_harmonic + (1.0f - alpha) * prev_harmonic;
+    act->spikeResonance = alpha * new_resonance + (1.0f - alpha) * prev_resonance;
+    
+    // Дополнительная стабилизация через нормализацию
+    float total = act->baseActivation + act->harmonicActivation + act->spikeResonance;
+    if (total > 2.0f) { // Предотвращаем взрыв активации
+        act->baseActivation *= 2.0f / total;
+        act->harmonicActivation *= 2.0f / total;
+        act->spikeResonance *= 2.0f / total;
+    }
+    
+    // Применяем ограничения с учетом стабильностного фактора
+    float max_val = 1.0f + (float)stability_factor * 0.5f;
+    CLAMP_VAL(act->baseActivation, 0.0f, max_val);
+    CLAMP_VAL(act->harmonicActivation, 0.0f, max_val);
+    CLAMP_VAL(act->spikeResonance, 0.0f, max_val);
+    
+    // Сохраняем текущие значения для следующего вызова
+    prev_base = act->baseActivation;
+    prev_harmonic = act->harmonicActivation;
+    prev_resonance = act->spikeResonance;
 }
 
 float propagate_through_hierarchy(HierarchicalSpikeSystem* system, FractalSpike* input_spike) {

@@ -24,7 +24,13 @@
     } \
 } while(0)
 #endif
-
+#ifndef CLAMP_VAL
+#define CLAMP_VAL(x, min, max) \
+    do { \
+        if ((x) < (min)) (x) = (min); \
+        else if ((x) > (max)) (x) = (max); \
+    } while(0)
+#endif
 #ifndef CLAMP
 #define CLAMP(x) do { if ((x) < 0.0f) (x) = 0.0f; if ((x) > 1.0f) (x) = 1.0f; } while(0)
 #endif
@@ -250,6 +256,6 @@ float semantic_coherence(const char** patterns, int pattern_count, float base_co
 float get_cached_activation(FractalHashCache* cache, FractalSpike* spike);
 void update_spike_learning_with_hash(FractalHashCache* cache, FractalSpike* spike, FractalActivation* act);
 void fractal_online_learning(FractalHashCache* cache, NeuralResonance* resonance, const char* input_pattern, float actual_output, float expected_output, float dimension);
-void apply_resonance_to_activation(FractalActivation* act, NeuralResonance* resonance);
+void apply_resonance_to_activation(FractalActivation* act, NeuralResonance* resonance, _Float16 stability_factor);
 
 #endif

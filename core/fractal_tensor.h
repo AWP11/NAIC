@@ -54,6 +54,8 @@ typedef struct FractalTensor {
 // Создание и уничтожение тензоров
 FractalTensor* fractal_tensor_create(int rows, int cols);
 FractalTensor* fractal_tensor_create_enhanced(int rows, int cols);
+FractalTensor* fractal_tensor_create_gradient_fibonacci(int rows, int cols);
+FractalTensor* fractal_tensor_create_fractal_gradient(int rows, int cols, int levels);
 void fractal_tensor_destroy(FractalTensor* tensor);
 
 // ==================== ФРАКТАЛЬНЫЙ АНАЛИЗ ====================
@@ -103,11 +105,30 @@ float calculate_global_reward(FractalTensor* tensor, float intensity, float frac
 void update_fractal_dimension_with_feedback(FractalTensor* tensor, float* series, int length);
 void adapt_learning_parameters(FractalTensor* tensor, float performance);
 
-// ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+// ==================== ФУНКЦИИ ГРАДИЕНТНОГО ЗАПОЛНЕНИЯ ====================
+
+// Функции градиентного заполнения
+void fractal_tensor_fill_gradient_fibonacci(FractalTensor* tensor);
+void fractal_tensor_fill_spiral_pattern(FractalTensor* tensor);
+void fractal_tensor_fill_radial_gradient(FractalTensor* tensor);
+void fractal_tensor_fill_fractal_quadrants(FractalTensor* tensor, int levels);
+
+// Вспомогательные функции для заполнения (не экспортируем наружу)
+void fill_xy_axes_fibonacci(float** data, int rows, int cols);
+
+// Анализ градиентных паттернов
+void fractal_tensor_analyze_structure(FractalTensor* tensor);
+float calculate_similarity_coefficient(FractalTensor* tensor);
+float calculate_gradient_variance(FractalTensor* tensor);
+void check_fractal_self_similarity(FractalTensor* tensor);
+
+// ==================== ВИЗУАЛИЗАЦИЯ И ДИАГНОСТИКА ====================
 
 // Ввод-вывод и диагностика
 void fractal_tensor_print(const FractalTensor* tensor);
 void fractal_tensor_print_detailed(const FractalTensor* tensor);
+void print_fractal_tensor_gradient(FractalTensor* tensor);
+void print_fractal_tensor_pattern(FractalTensor* tensor);
 void fractal_tensor_save_to_file(const FractalTensor* tensor, const char* filename);
 FractalTensor* fractal_tensor_load_from_file(const char* filename);
 
@@ -144,26 +165,48 @@ float calculate_autocorrelation(float* series, int length, int lag);
 #define CLAMP_FRACTAL_DIM(x) do { if ((x) < 1.0f) (x) = 1.0f; if ((x) > 3.0f) (x) = 3.0f; } while(0)
 #endif
 
+#ifndef CLAMP_GRADIENT
+#define CLAMP_GRADIENT(x, min, max) do { \
+    if ((x) < (min)) (x) = (min); \
+    if ((x) > (max)) (x) = (max); \
+} while(0)
+#endif
+
 // Уровни иерархической обработки
 #define TENSOR_LEVEL_LOW 0
 #define TENSOR_LEVEL_MID 1
 #define TENSOR_LEVEL_HIGH 2
+
+// Режимы заполнения
+#define FILL_MODE_FIBONACCI 0
+#define FILL_MODE_SPIRAL 1
+#define FILL_MODE_RADIAL 2
+#define FILL_MODE_FRACTAL 3
+#define FILL_MODE_HYBRID 4
 
 // Пороговые значения для принятия решений
 #define CRITICALITY_THRESHOLD 0.7f
 #define CHAOS_THRESHOLD 0.5f
 #define PERFORMANCE_THRESHOLD_HIGH 0.7f
 #define PERFORMANCE_THRESHOLD_LOW 0.3f
+#define GRADIENT_SIMILARITY_THRESHOLD 0.8f
 
 // Константы обучения
 #define DEFAULT_LEARNING_RATE 0.01f
 #define MAX_LEARNING_RATE 0.1f
 #define MIN_LEARNING_RATE 0.001f
 
+// Константы градиентного заполнения
+#define GOLDEN_RATIO 1.61803398875f
+#define FIBONACCI_START_X 1.0f
+#define FIBONACCI_START_Y 2.0f
+#define MAX_FRACTAL_LEVELS 8
+
 // Флаги для режимов работы
 #define TENSOR_MODE_BASIC 0
 #define TENSOR_MODE_ENHANCED 1
 #define TENSOR_MODE_HIERARCHICAL 2
+#define TENSOR_MODE_GRADIENT 3
 
 // ==================== СТРУКТУРЫ ДЛЯ АНАЛИЗА ====================
 
@@ -176,6 +219,9 @@ typedef struct {
     int is_critical;
     float performance_score;
     float stability_factor;
+    float gradient_variance;
+    float self_similarity;
+    int fill_mode;
 } TensorAnalysisResult;
 
 typedef struct {
@@ -186,9 +232,28 @@ typedef struct {
     long analysis_timestamp;
 } SpikeAnalysisData;
 
+// Структура для анализа градиентных паттернов
+typedef struct {
+    float min_value;
+    float max_value;
+    float center_value;
+    float gradient_range;
+    float diagonal_symmetry;
+    float quadrant_similarity[4];
+    float fractal_scaling_factor;
+} GradientPatternAnalysis;
+
 // Функции для работы со структурами анализа
 TensorAnalysisResult analyze_tensor_comprehensive(FractalTensor* tensor);
 SpikeAnalysisData prepare_spike_analysis_data(FractalTensor* tensor, const char* source);
+GradientPatternAnalysis analyze_gradient_pattern(FractalTensor* tensor);
 void free_analysis_data(SpikeAnalysisData* data);
+
+// ==================== ФУНКЦИИ ОПТИМИЗАЦИИ ====================
+
+// Оптимизация градиентных паттернов
+void optimize_gradient_pattern(FractalTensor* tensor, float target_similarity);
+void refill_tensor_with_optimization(FractalTensor* tensor, int fill_mode);
+void blend_gradient_patterns(FractalTensor* tensor, int mode1, int mode2, float blend_factor);
 
 #endif // FRACTAL_TENSOR_H
