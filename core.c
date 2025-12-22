@@ -4,7 +4,6 @@
 #include <stdint.h>
 #include <time.h>
 #include <math.h>
-
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -21,7 +20,7 @@
 #define HISTORY_SIZE 500
 #define LOW_ACT_THRESHOLD 60
 #define MEM_REDUCE_INTERVAL 15
-#define WORKING_MEM_SIZE 50
+#define WORKING_MEM_SIZE 250 // Исправлено: было 50, теперь 250
 #define DROPOUT_RATE 2
 #define LINK_STRENGTH_INC 12
 #define LINK_STRENGTH_DEC 6
@@ -126,6 +125,16 @@ struct SystemGoals {
     uint8_t dropout_enabled;
 };
 
+// ===== Типы для поиска =====
+typedef enum {
+    SEARCH_MOST_ACTIVE,    // Наивысшая активность
+    SEARCH_RESONANT,       // Резонанс (петли, связи)
+    SEARCH_EFFICIENT,      // Наивысшая эффективность
+    SEARCH_CUSTOM_SCORE    // Пользовательская функция оценки
+} SearchStrategy;
+
+typedef uint32_t (*ScoreFunction)(BitTensor* t, void* context);
+
 // ===== Глобальные состояния =====
 BitMemory memo[MAX_MEM_ENTRIES];
 BitTensor tnsrs[MAX_TENSORS];
@@ -157,9 +166,9 @@ BitTensor* find_efficient_match(BitTensor* input);
 void optimize_tensor(BitTensor* t);
 void update_bit_net_with_goals(void);
 void proc_bit_input_raw(const uint8_t* binary, uint16_t input_len);
-BitTensor* get_resonant_tensor(void);
-void decode_tnsr(BitTensor* t, char* buffer, uint16_t buf_size);
-void encode_tnsr(BitTensor* t, const uint8_t* data, uint16_t data_len);
+// УДАЛЕНО: BitTensor* get_resonant_tensor(void); // Заменена
+// УДАЛЕНО: BitTensor* get_most_active_tensor(void); // Заменена
+BitTensor* find_significant_tensor(SearchStrategy strategy, void* context); // НОВАЯ
 void save_tnsr(BitTensor* t);
 void add_to_working_memory(BitTensor* t);
 BitTensor* get_from_working_memory(uint8_t min_priority);
@@ -172,7 +181,6 @@ void decay_unused_links(void);
 void learn_by_binary_update(BitTensor* target, const uint8_t* input_data, uint16_t input_len);
 void prevent_overfitting_by_bit_shift(BitTensor* t);
 void update_thought_stream(void);
-BitTensor* get_most_active_tensor(void);
 void self_reflect_on_thought(void);
 int save_state_to_file(const char* filename);
 int load_state_from_file(const char* filename);
@@ -189,7 +197,6 @@ static BitTensor* index_to_tensor(uint16_t idx) {
 }
 
 // ===== Реализации =====
-
 uint8_t fast_log2(uint32_t x) {
     if (x == 0) return 0;
     uint8_t log = 0;
@@ -253,7 +260,7 @@ uint8_t calc_res_match(BitTensor* a, BitTensor* b) {
 
 uint8_t calculate_efficiency(BitTensor* t) {
     if (!t) return 0;
-    uint32_t benefit = (uint32_t)t->act * t->res;
+    uint32_t benefit = (uint32_t)t->act * t->res * (255 - t->ent); // Учет энтропии: низкая энтропия увеличивает пользу
     uint32_t cost = t->compute_cost + 1;
     uint8_t eff = (uint8_t)(benefit / cost);
     if (eff > 255) eff = 255;
@@ -363,10 +370,13 @@ void reduce_tnsr_mem(BitTensor* t) {
 
 void set_tnsr_link(BitTensorTensor* tt, uint16_t row_idx, uint16_t col_idx, uint16_t tnsr_idx) {
     if (!tt || tt->enc_type != 1 || !tt->tensor_indices) return;
-    uint32_t element_idx = row_idx * tt->num_tensors + col_idx;
-    if (element_idx < tt->num_tensors) {
-        tt->tensor_indices[element_idx] = tnsr_idx;
-    }
+    uint32_t element_idx = (uint32_t)row_idx * tt->num_tensors + col_idx; // 1. Расчёт индекса
+    if (element_idx >= tt->num_tensors) return; // 2. Проверка границ
+    uint16_t old_idx = tt->tensor_indices[element_idx]; // 3. Сохранение старого индекса (буферизация)
+    tt->tensor_indices[element_idx] = tnsr_idx; // 4. Установка нового
+    // 5. (Опционально) Логика сброса кэша или инвалидации, если старый тензор был важен
+    // 6. (Опционально) Проверка на переполнение tnsr_idx (например, если 0xFFFF означает "пусто")
+    // 7. (Опционально) Обновление мета-информации о tt (например, пометка, что структура изменилась)
 }
 
 uint16_t get_tnsr_link(BitTensorTensor* tt, uint16_t row_idx, uint16_t col_idx) {
@@ -477,25 +487,42 @@ BitLink* create_link(BitTensor* src, BitTensor* tgt) {
 void update_link_strength(BitLink* link, uint8_t was_successful) {
     if (!link) return;
     link->use_count++;
+
     if (was_successful) {
         link->success_count++;
+        // Увеличение силы при успехе (как и раньше)
         if (link->strength + LINK_STRENGTH_INC <= LINK_MAX_STRENGTH) {
             link->strength += LINK_STRENGTH_INC;
         } else {
             link->strength = LINK_MAX_STRENGTH;
         }
+        // Улучшение совместимости (res) и пересчёт веса
         uint8_t new_res = link->res + 5;
         if (new_res > RES_MAX) new_res = RES_MAX;
         link->res = new_res;
         link->weight = (link->weight * 9 + (link->src->act + link->tgt->act) * 127) >> 3;
     } else {
-        if (link->strength > LINK_STRENGTH_DEC + LINK_MIN_STRENGTH) {
-            link->strength -= LINK_STRENGTH_DEC;
-        } else {
-            link->strength = LINK_MIN_STRENGTH;
+        // --- ОСЛАБЛЕНИЕ ПРИ НЕУДАЧЕ ---
+        // Вместо фиксированного уменьшения, уменьшаем на процент от текущей силы
+        // Это делает ослабление "нормальнее" для сильных связей
+        uint8_t decay_amount = (link->strength * 3) / 100; // Уменьшаем на 3% текущей силы (пример)
+        if (decay_amount == 0 && link->strength > LINK_MIN_STRENGTH) {
+            decay_amount = 1; // Гарантируем минимальное уменьшение, если процент < 1
         }
-        if (link->res > 10) link->res -= 2;
+
+        if (link->strength > decay_amount + LINK_MIN_STRENGTH) {
+            link->strength -= decay_amount;
+        } else {
+            link->strength = LINK_MIN_STRENGTH; // Не опускаем ниже минимума
+        }
+
+        // Ослабление совместимости (res) при неудаче
+        if (link->res > 10) {
+            link->res -= 2;
+        }
     }
+
+    // Обновляем время последнего использования
     link->ts = (uint32_t)time(NULL);
 }
 
@@ -516,56 +543,6 @@ void decay_unused_links(void) {
             }
         }
     }
-}
-
-void encode_tnsr(BitTensor* t, const uint8_t* data, uint16_t data_len) {
-    if (!t || !data || data_len == 0) return;
-    uint16_t max_cols = data_len < t->cols ? data_len : t->cols;
-    for (uint16_t i = 0; i < max_cols; i++) {
-        uint8_t byte = data[i];
-        for (uint8_t bit = 0; bit < 8; bit++) {
-            if (bit < t->rows) {
-                uint32_t bit_idx = bit * t->cols + i;
-                if (BIT_GET(byte, bit)) {
-                    BIT_SET(t->data[bit_idx / 8], bit_idx % 8);
-                } else {
-                    BIT_CLEAR(t->data[bit_idx / 8], bit_idx % 8);
-                }
-            }
-        }
-    }
-    for (uint16_t i = max_cols; i < t->cols; i++) {
-        for (uint8_t bit = 0; bit < t->rows; bit++) {
-            uint32_t bit_idx = bit * t->cols + i;
-            BIT_CLEAR(t->data[bit_idx / 8], bit_idx % 8);
-        }
-    }
-    t->ent = calc_bit_ent(t);
-    t->efficiency = calculate_efficiency(t);
-}
-
-void decode_tnsr(BitTensor* t, char* buffer, uint16_t buf_size) {
-    if (!t || !buffer || buf_size == 0) return;
-    uint16_t max_cols = t->cols < buf_size - 1 ? t->cols : buf_size - 1;
-    for (uint16_t i = 0; i < max_cols; i++) {
-        uint8_t byte = 0;
-        for (uint8_t bit = 0; bit < 8; bit++) {
-            if (bit < t->rows) {
-                uint32_t bit_idx = bit * t->cols + i;
-                if (BIT_GET(t->data[bit_idx / 8], bit_idx % 8)) {
-                    byte |= (1 << bit);
-                }
-            }
-        }
-        if (byte >= 32 && byte <= 126) {
-            buffer[i] = (char)byte;
-        } else if (byte == 0) {
-            buffer[i] = ' ';
-        } else {
-            buffer[i] = '.';
-        }
-    }
-    buffer[max_cols] = '\0';
 }
 
 void update_bit_net_with_goals(void) {
@@ -725,19 +702,31 @@ BitTensor* find_efficient_match(BitTensor* input) {
     return best_match;
 }
 
-void proc_bit_input(const char* input) {
-    if (!input || !*input) return;
-    size_t input_len = strlen(input);
-    proc_bit_input_raw((const uint8_t*)input, (uint16_t)input_len);
-}
-
+// УДАЛЕНО: void proc_bit_input(const char* input)
+// Теперь кодирование должно делаться в main.c
+// УДАЛЕНО вызов encode_tnsr() - теперь данные должны быть уже закодированы
 void proc_bit_input_raw(const uint8_t* binary, uint16_t input_len) {
     if (!binary || input_len == 0) return;
-    BitTensor* input_tnsr = create_tnsr(8, input_len * ENCODER_QUALITY);
-    if (!input_tnsr) { printf("Error creating input tensor.\n"); return; }
-    encode_tnsr(input_tnsr, binary, input_len);
+    // Создаем тензор подходящего размера
+    uint16_t rows = 8;
+    uint16_t cols = input_len * 8;  // По 8 бит на байт
+    BitTensor* input_tnsr = create_tnsr(rows, cols);
+    if (!input_tnsr) { 
+        printf("[core] Error creating input tensor.\n"); 
+        return; 
+    }
+    // Копируем бинарные данные в тензор (теперь это делает main)
+    uint32_t total_bits = rows * cols;
+    uint32_t bits_to_copy = input_len * 8;
+    if (bits_to_copy > total_bits) bits_to_copy = total_bits;
+    // Копируем байты напрямую
+    uint32_t bytes_to_copy = (bits_to_copy + 7) / 8;
+    if (input_tnsr->data) {
+        memcpy(input_tnsr->data, binary, bytes_to_copy);
+    }
     input_tnsr->res = 150;
     input_tnsr->act = 180;
+    input_tnsr->ent = calc_bit_ent(input_tnsr);
     input_tnsr->efficiency = calculate_efficiency(input_tnsr);
     add_to_working_memory(input_tnsr);
     BitTensor* match_tnsr = find_efficient_match(input_tnsr);
@@ -792,7 +781,7 @@ void prevent_overfitting_by_bit_shift(BitTensor* t) {
 }
 
 void self_reflect_on_thought(void) {
-    BitTensor* most_active = get_most_active_tensor();
+    BitTensor* most_active = find_significant_tensor(SEARCH_MOST_ACTIVE, NULL); // Используем новую функцию
     if (!most_active) return;
     BitLink* self_link = NULL;
     for (uint16_t i = 0; i < lnk_count; i++) {
@@ -844,86 +833,135 @@ void update_thought_stream(void) {
     self_reflect_on_thought();
 }
 
-BitTensor* get_most_active_tensor(void) {
-    BitTensor* most_active = NULL;
-    uint8_t max_act = 0;
-    for (uint16_t i = 0; i < tnsr_count; i++) {
-        if (tnsrs[i].act > max_act && !tnsrs[i].dropout) {
-            max_act = tnsrs[i].act;
-            most_active = &tnsrs[i];
+// --- НОВАЯ ОБЪЕДИНЁННАЯ ФУНКЦИЯ ---
+static uint32_t calculate_resonance_score(BitTensor* t, uint32_t now) {
+    if (!t) return 0;
+
+    // Учет связей (петель и активности)
+    uint32_t link_score = 0;
+    uint16_t link_count = 0;
+    for (uint16_t i = 0; i < lnk_count; i++) {
+        BitLink* l = &lnks[i];
+        if (l->src == t || l->tgt == t) {
+            if (l->strength > 40 && !l->src->dropout && !l->tgt->dropout) {
+                link_score += l->strength;
+                link_count++;
+            }
         }
     }
-    return most_active;
+    uint32_t avg_link_strength = link_count ? link_score / link_count : 0;
+
+    // Собственные параметры
+    uint32_t base_score = (uint32_t)t->act * t->res * t->efficiency;
+    uint32_t connection_bonus = (uint32_t)t->conn * avg_link_strength * 10; // Пример
+    uint32_t stability_bonus = (uint32_t)t->stab * 10;
+
+    // Учет "свежести" (recently updated)
+    uint32_t age_penalty = (now - t->lu) * 5; // Пример штрафа
+    if (age_penalty > base_score) age_penalty = base_score; // Не ниже 0
+
+    uint32_t final_score = base_score + connection_bonus + stability_bonus - age_penalty;
+    return final_score;
 }
 
-BitTensor* get_resonant_tensor(void) {
-    if (tnsr_count < 2 || lnk_count == 0) return NULL;
-    uint32_t now = (uint32_t)time(NULL);
-    uint32_t best_loop_score = 0;
+BitTensor* find_significant_tensor(SearchStrategy strategy, void* context) {
     BitTensor* best_candidate = NULL;
-    for (uint16_t i = 0; i < lnk_count; i++) {
-        BitLink* link_ab = &lnks[i];
-        if (!link_ab->src || !link_ab->tgt || link_ab->strength < 40) continue;
-        BitLink* link_ba = NULL;
-        for (uint16_t j = 0; j < lnk_count; j++) {
-            BitLink* candidate = &lnks[j];
-            if (candidate->src == link_ab->tgt && candidate->tgt == link_ab->src) {
-                link_ba = candidate;
+    uint32_t best_score = 0;
+    uint32_t now = (uint32_t)time(NULL);
+
+    // Проходим по *всем* потенциально значимым тензорам
+    // 1. Основной массив tnsrs
+    for (uint16_t i = 0; i < tnsr_count; i++) {
+        BitTensor* t = &tnsrs[i];
+        if (!t->data || t->dropout) continue; // Пропускаем недействительные/дропнувшиеся
+
+        uint32_t score = 0;
+
+        switch (strategy) {
+            case SEARCH_MOST_ACTIVE:
+                score = t->act; // Просто активность
+                break;
+            case SEARCH_EFFICIENT:
+                score = (uint32_t)t->efficiency * t->act; // Эффективность * Активность
+                break;
+            case SEARCH_RESONANT:
+                score = calculate_resonance_score(t, now);
+                break;
+            case SEARCH_CUSTOM_SCORE: {
+                ScoreFunction custom_func = (ScoreFunction)context;
+                if (custom_func) {
+                    score = custom_func(t, NULL); // Контекст для custom_func можно передать через context
+                }
                 break;
             }
+            default:
+                continue; // Неизвестная стратегия
         }
-        if (!link_ba || link_ba->strength < 40) continue;
-        BitTensor* A = link_ab->src;
-        BitTensor* B = link_ab->tgt;
-        if (A->act < 30 || B->act < 30 || A->dropout || B->dropout) continue;
-        if (now - A->lu > 120 || now - B->lu > 120) continue;
-        uint32_t mutual_strength = (uint32_t)link_ab->strength * link_ba->strength;
-        uint16_t avg_act = (A->act + B->act) / 2;
-        uint16_t avg_res = (A->res + B->res) / 2;
-        uint16_t avg_eff = (A->efficiency + B->efficiency) / 2;
-        uint16_t coact_bonus = (A->act * B->act) >> 8;
-        uint32_t score = mutual_strength;
-        score = (score * avg_act) >> 8;
-        score = (score * avg_res) >> 8;
-        score = (score * avg_eff) >> 8;
-        score += (coact_bonus << 4);
-        uint32_t age_bonus = 255 - (now - link_ab->last_act) / 2;
-        if (age_bonus > 255) age_bonus = 255;
-        if (age_bonus < 0) age_bonus = 0;
-        score = (score * age_bonus) >> 8;
-        if (score > best_loop_score && score > 5000) {
-            best_loop_score = score;
-            best_candidate = (A->compute_cost <= B->compute_cost) ? A : B;
+
+        if (score > best_score) {
+            best_score = score;
+            best_candidate = t;
         }
     }
-    if (!best_candidate) {
-        for (uint16_t i = 0; i < lnk_count; i++) {
-            BitLink* link = &lnks[i];
-            if (!link->src || !link->tgt) continue;
-            if (link->strength < 80 || link->tgt->act < 60 || link->tgt->dropout) continue;
-            uint32_t score = (uint32_t)link->strength * link->tgt->act;
-            if (score > best_loop_score) {
-                best_loop_score = score;
-                best_candidate = link->tgt;
+
+    // 2. Проверяем рабочую память (working_mem)
+    // Эти тензоры *уже* отмечены как значимые (например, через add_to_working_memory)
+    // Возможно, они имеют более высокий приоритет?
+    for (uint8_t i = 0; i < working_mem_count; i++) {
+        BitTensor* t = working_mem[i].tensor;
+        if (!t || t->dropout) continue;
+
+        // Проверяем, не был ли тензор уже учтен выше (в tnsrs)
+        // Если да, его оценка могла быть выше, и он уже выбран.
+        // Если нет, оцениваем его здесь.
+        // Для простоты, повторим логику, но с учетом приоритета из раб. памяти.
+        // Можно добавить bonus за приоритет/частоту доступа.
+        uint32_t score = 0;
+        uint8_t priority_bonus = working_mem[i].priority; // Например, 0-255
+        uint8_t access_bonus = working_mem[i].access_count; // Или логарифм от него?
+
+        switch (strategy) {
+            case SEARCH_MOST_ACTIVE:
+                score = (uint32_t)t->act + priority_bonus * 2; // Приоритет важен
+                break;
+            case SEARCH_EFFICIENT:
+                score = (uint32_t)t->efficiency * t->act + priority_bonus * access_bonus;
+                break;
+            case SEARCH_RESONANT:
+                score = calculate_resonance_score(t, now) + priority_bonus * 5; // Сильный бонус за приоритет
+                break;
+            case SEARCH_CUSTOM_SCORE: {
+                ScoreFunction custom_func = (ScoreFunction)context;
+                if (custom_func) {
+                    score = custom_func(t, context) + priority_bonus * 3; // Бонус для кастомной стратегии
+                }
+                break;
             }
+            default:
+                continue;
+        }
+
+        if (score > best_score) {
+            best_score = score;
+            best_candidate = t;
         }
     }
-    if (!best_candidate) {
-        for (uint16_t i = 0; i < tnsr_count; i++) {
-            BitTensor* t = &tnsrs[i];
-            if (!t->data || t->act < 20 || t->dropout || t->conn < 2) continue;
-            uint16_t res_score = (uint16_t)t->res * t->act * t->conn;
-            if (res_score > best_loop_score) {
-                best_loop_score = res_score;
-                best_candidate = t;
-            }
-        }
-    }
-    if (best_candidate && best_loop_score > 20000) {
+
+    // 3. (Опционально) Проверить тензоры из других источников, если они есть
+    // Например, переданные как временные аргументы извне - тогда нужно изменить сигнатуру функции,
+    // чтобы принимать *массив* тензоров для поиска. Но пока этого не делаем, пусть работает с глобалами.
+
+    // Если стратегия резонанса и найден кандидат с высоким баллом, слегка повысим его стабильность
+    if (strategy == SEARCH_RESONANT && best_candidate && best_score > 20000) {
         best_candidate->stab = (best_candidate->stab * 7 + 200) >> 3;
     }
-    return best_candidate;
+
+    return best_candidate; // Может вернуть NULL, если ничего не нашлось
 }
+
+// --- СТАРЫЕ ФУНКЦИИ УДАЛЕНЫ ---
+// BitTensor* get_most_active_tensor(void) { ... }
+// BitTensor* get_resonant_tensor(void) { ... }
 
 void save_tnsr(BitTensor* t) {
     if (!t || !t->data || memo_size >= MAX_MEM_ENTRIES) return;
@@ -951,15 +989,12 @@ void save_tnsr(BitTensor* t) {
 }
 
 // ===== Сохранение/Загрузка =====
-
 int save_state_to_file(const char* filename) {
     int fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) { perror("open(save)"); return -1; }
-
 #define WRITE(ptr, size, count) \
     if (write(fd, (ptr), (size_t)(size)*(count)) != (ssize_t)((size_t)(size)*(count))) { \
         perror("write"); close(fd); return -1; }
-
     WRITE(&tnsr_count, sizeof(uint16_t), 1);
     WRITE(&lnk_count, sizeof(uint16_t), 1);
     WRITE(&memo_size, sizeof(uint16_t), 1);
@@ -970,7 +1005,6 @@ int save_state_to_file(const char* filename) {
     WRITE(&interaction_count, sizeof(uint32_t), 1);
     WRITE(&last_mem_check_ts, sizeof(uint32_t), 1);
     WRITE(&sstate, sizeof(BitSystemState), 1);
-
     for (uint16_t i = 0; i < tnsr_count; i++) {
         BitTensor* t = &tnsrs[i];
         WRITE(&t->rows, sizeof(uint16_t), 1);
@@ -992,7 +1026,6 @@ int save_state_to_file(const char* filename) {
             WRITE(t->data, 1, data_bytes);
         }
     }
-
     for (uint16_t i = 0; i < lnk_count; i++) {
         uint16_t src_idx = tensor_to_index(lnks[i].src);
         uint16_t tgt_idx = tensor_to_index(lnks[i].tgt);
@@ -1006,9 +1039,7 @@ int save_state_to_file(const char* filename) {
         WRITE(&lnks[i].use_count, sizeof(uint16_t), 1);
         WRITE(&lnks[i].success_count, sizeof(uint16_t), 1);
     }
-
     WRITE(memo, sizeof(BitMemory), memo_size);
-
     for (uint16_t i = 0; i < tt_count; i++) {
         BitTensorTensor* tt = &t_tnsrs[i];
         WRITE(&tt->enc_type, sizeof(uint8_t), 1);
@@ -1029,7 +1060,6 @@ int save_state_to_file(const char* filename) {
             WRITE(tt->tensor_indices, sizeof(uint16_t), tt->num_tensors);
         }
     }
-
     for (uint8_t i = 0; i < working_mem_count; i++) {
         uint16_t t_idx = tensor_to_index(working_mem[i].tensor);
         WRITE(&t_idx, sizeof(uint16_t), 1);
@@ -1037,7 +1067,6 @@ int save_state_to_file(const char* filename) {
         WRITE(&working_mem[i].priority, sizeof(uint8_t), 1);
         WRITE(&working_mem[i].access_count, sizeof(uint8_t), 1);
     }
-
     close(fd);
     return 0;
 }
@@ -1048,7 +1077,6 @@ int load_state_from_file(const char* filename) {
         if (errno == ENOENT) return 0;
         perror("open(load)"); return -1;
     }
-
     for (uint16_t i = 0; i < tnsr_count; i++) free(tnsrs[i].data);
     for (uint16_t i = 0; i < tt_count; i++) {
         free(t_tnsrs[i].data);
@@ -1061,30 +1089,25 @@ int load_state_from_file(const char* filename) {
     memset(working_mem, 0, sizeof(working_mem));
     tnsr_count = lnk_count = memo_size = tt_count = working_mem_count = 0;
     sys_res = RES_HALF;
-
 #define READ(ptr, size, count) \
     if (read(fd, (ptr), (size_t)(size)*(count)) != (ssize_t)((size_t)(size)*(count))) { \
         perror("read"); close(fd); return -1; }
-
     READ(&tnsr_count, sizeof(uint16_t), 1);
     READ(&lnk_count, sizeof(uint16_t), 1);
     READ(&memo_size, sizeof(uint16_t), 1);
     READ(&tt_count, sizeof(uint16_t), 1);
     READ(&working_mem_count, sizeof(uint8_t), 1);
-
     if (tnsr_count > MAX_TENSORS || lnk_count > MAX_LINKS ||
         memo_size > MAX_MEM_ENTRIES || tt_count > MAX_TT_ENTRIES ||
         working_mem_count > WORKING_MEM_SIZE) {
         fprintf(stderr, "[ERR] Corrupted state: count overflow\n");
         close(fd); return -1;
     }
-
     READ(&goals, sizeof(SystemGoals), 1);
     READ(&sys_res, sizeof(uint8_t), 1);
     READ(&interaction_count, sizeof(uint32_t), 1);
     READ(&last_mem_check_ts, sizeof(uint32_t), 1);
     READ(&sstate, sizeof(BitSystemState), 1);
-
     for (uint16_t i = 0; i < tnsr_count; i++) {
         BitTensor* t = &tnsrs[i];
         READ(&t->rows, sizeof(uint16_t), 1);
@@ -1100,7 +1123,6 @@ int load_state_from_file(const char* filename) {
         READ(&t->compute_cost, sizeof(uint32_t), 1);
         READ(&t->goal_active, sizeof(uint8_t), 1);
         READ(&t->dropout, sizeof(uint8_t), 1);
-
         uint32_t data_bytes;
         READ(&data_bytes, sizeof(uint32_t), 1);
         if (data_bytes > 0) {
@@ -1111,7 +1133,6 @@ int load_state_from_file(const char* filename) {
             t->data = NULL;
         }
     }
-
     struct {
         uint16_t src_idx, tgt_idx;
         uint8_t strength, res;
@@ -1119,7 +1140,6 @@ int load_state_from_file(const char* filename) {
         uint32_t ts, last_act;
         uint16_t use_count, success_count;
     } link_buf[MAX_LINKS];
-
     for (uint16_t i = 0; i < lnk_count; i++) {
         READ(&link_buf[i].src_idx, sizeof(uint16_t), 1);
         READ(&link_buf[i].tgt_idx, sizeof(uint16_t), 1);
@@ -1131,9 +1151,7 @@ int load_state_from_file(const char* filename) {
         READ(&link_buf[i].use_count, sizeof(uint16_t), 1);
         READ(&link_buf[i].success_count, sizeof(uint16_t), 1);
     }
-
     READ(memo, sizeof(BitMemory), memo_size);
-
     for (uint16_t i = 0; i < tt_count; i++) {
         BitTensorTensor* tt = &t_tnsrs[i];
         READ(&tt->enc_type, sizeof(uint8_t), 1);
@@ -1143,7 +1161,6 @@ int load_state_from_file(const char* filename) {
         READ(&tt->act, sizeof(uint8_t), 1);
         READ(&tt->lu, sizeof(uint32_t), 1);
         READ(&tt->efficiency, sizeof(uint8_t), 1);
-
         uint32_t data_bytes;
         READ(&data_bytes, sizeof(uint32_t), 1);
         if (data_bytes > 0) {
@@ -1151,7 +1168,6 @@ int load_state_from_file(const char* filename) {
             if (!tt->data) { close(fd); return -1; }
             READ(tt->data, 1, data_bytes);
         }
-
         if (tt->enc_type == 1) {
             tt->tensor_indices = (uint16_t*)malloc(tt->num_tensors * sizeof(uint16_t));
             if (!tt->tensor_indices) { close(fd); return -1; }
@@ -1160,7 +1176,6 @@ int load_state_from_file(const char* filename) {
             tt->tensor_indices = NULL;
         }
     }
-
     for (uint8_t i = 0; i < working_mem_count; i++) {
         uint16_t t_idx;
         READ(&t_idx, sizeof(uint16_t), 1);
@@ -1169,7 +1184,6 @@ int load_state_from_file(const char* filename) {
         READ(&working_mem[i].access_count, sizeof(uint8_t), 1);
         working_mem[i].tensor = index_to_tensor(t_idx);
     }
-
     for (uint16_t i = 0; i < lnk_count; i++) {
         BitLink* l = &lnks[i];
         l->src = index_to_tensor(link_buf[i].src_idx);
@@ -1182,7 +1196,6 @@ int load_state_from_file(const char* filename) {
         l->use_count    = link_buf[i].use_count;
         l->success_count= link_buf[i].success_count;
     }
-
     close(fd);
     return 0;
 }

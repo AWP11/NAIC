@@ -15,7 +15,7 @@
 #define HISTORY_SIZE 500
 #define LOW_ACT_THRESHOLD 60
 #define MEM_REDUCE_INTERVAL 15
-#define WORKING_MEM_SIZE 50
+#define WORKING_MEM_SIZE 250  // Исправлено: было 50, теперь 250, согласно .c файлу
 #define DROPOUT_RATE 2
 #define LINK_STRENGTH_INC 12
 #define LINK_STRENGTH_DEC 6
@@ -137,6 +137,16 @@ extern uint32_t interaction_count;
 extern uint32_t last_mem_check_ts;
 extern uint8_t working_mem_count;
 
+// ===== Типы для поиска =====
+typedef enum {
+    SEARCH_MOST_ACTIVE,    // Наивысшая активность
+    SEARCH_RESONANT,       // Резонанс (петли, связи)
+    SEARCH_EFFICIENT,      // Наивысшая эффективность
+    SEARCH_CUSTOM_SCORE    // Пользовательская функция оценки
+} SearchStrategy;
+
+typedef uint32_t (*ScoreFunction)(BitTensor* t, void* context);
+
 // ===== Прототипы функций =====
 BitTensor* create_tnsr(uint16_t rows, uint16_t cols);
 BitTensorTensor* create_tt(uint16_t num_tensors, uint8_t enc_type);
@@ -151,14 +161,18 @@ BitTensor* find_efficient_match(BitTensor* input);
 void optimize_tensor(BitTensor* t);
 void update_bit_net_with_goals(void);
 void proc_bit_input_raw(const uint8_t* binary, uint16_t input_len);
-void proc_bit_input(const char* input);
-BitTensor* get_resonant_tensor(void);
-BitTensor* get_most_active_tensor(void);
+// УДАЛЕНО: void proc_bit_input(const char* input);
+
+// --- НОВАЯ ОБЪЕДИНЁННАЯ ФУНКЦИЯ ---
+BitTensor* find_significant_tensor(SearchStrategy strategy, void* context);
+
+// --- УДАЛЕНО: Были прототипы для старых функций ---
+// BitTensor* get_resonant_tensor(void);
+// BitTensor* get_most_active_tensor(void);
+
 void update_thought_stream(void);
 void self_reflect_on_thought(void);
 
-void decode_tnsr(BitTensor* t, char* buffer, uint16_t buf_size);
-void encode_tnsr(BitTensor* t, const uint8_t* data, uint16_t data_len);
 void save_tnsr(BitTensor* t);
 
 void add_to_working_memory(BitTensor* t);

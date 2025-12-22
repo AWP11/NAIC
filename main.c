@@ -3,686 +3,646 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
-#include <math.h>
-#include "core.h"
-#define M_PI 3.1415
-// ============================================
-// ПРОТОТИПЫ ФУНКЦИЙ
-// ============================================
+#include <locale.h>
+#include <wchar.h>
+#include "core.h" // Теперь включает обновлённые прототипы
 
-void generate_noise_from_tensor(BitTensor* t, uint8_t* pixels, int width, int height);
-void generate_interference_pattern(BitTensor* t, uint8_t* pixels, int width, int height);
-void generate_fractal_pattern(BitTensor* t, uint8_t* pixels, int width, int height);
-void generate_link_visualization(uint8_t* pixels, int width, int height);
-void draw_line(uint8_t* pixels, int width, int height, 
-               int x1, int y1, int x2, int y2, int thickness, uint8_t value);
-void draw_circle(uint8_t* pixels, int width, int height, 
-                 int cx, int cy, int radius, uint8_t value);
-int save_pgm(const char* filename, uint8_t* pixels, int width, int height);
-int save_ppm(const char* filename, uint8_t* pixels_r, uint8_t* pixels_g, 
-             uint8_t* pixels_b, int width, int height);
-void generate_rgb_from_tensors(BitTensor* r_t, BitTensor* g_t, BitTensor* b_t,
-                               uint8_t* r_pixels, uint8_t* g_pixels, uint8_t* b_pixels,
-                               int width, int height);
-void create_animation_series(const char* basename, int frames, int width, int height);
-BitTensor* find_tensor_by_features(uint8_t min_act, uint8_t min_res, uint8_t max_ent);
-BitTensor* create_tensor_from_description(const char* desc);
-static uint16_t tensor_to_index(BitTensor* t);
+// ===== UTF-8 ЭНКОДЕР/ДЕКОДЕР =====
 
-// ============================================
-// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ СЕРИАЛИЗАЦИИ
-// ============================================
-
-static uint16_t tensor_to_index(BitTensor* t) {
-    if (!t) return 0xFFFF;
-    intptr_t diff = t - tnsrs;
-    return (diff >= 0 && diff < MAX_TENSORS) ? (uint16_t)diff : 0xFFFF;
+// Кодирует UTF-8 строку в бинарный формат для тензора
+void encode_utf8_to_binary(const char* utf8_str, uint8_t* binary_output, size_t* output_len, size_t max_len) {
+    if (!utf8_str || !binary_output || !output_len || max_len == 0) {
+        if (output_len) *output_len = 0;
+        return;
+    }
+    
+    const unsigned char* ptr = (const unsigned char*)utf8_str;
+    size_t pos = 0;
+    
+    while (*ptr && pos < max_len) {
+        unsigned char c = *ptr;
+        uint8_t char_len = 0;
+        
+        // Определяем длину UTF-8 символа
+        if ((c & 0x80) == 0) {
+            // 1-байтовый символ (ASCII)
+            char_len = 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            char_len = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            char_len = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            char_len = 4;
+        } else {
+            // Некорректный UTF-8, пропускаем
+            ptr++;
+            continue;
+        }
+        
+        // Копируем все байты символа
+        for (uint8_t i = 0; i < char_len && *ptr && pos < max_len; i++) {
+            binary_output[pos++] = *ptr++;
+        }
+    }
+    
+    *output_len = pos;
 }
 
-// ============================================
-// ИЗОБРАЗИТЕЛЬНЫЕ ГЕНЕРАТОРЫ
-// ============================================
-
-// 1. Генератор шума на основе тензора
-void generate_noise_from_tensor(BitTensor* t, uint8_t* pixels, int width, int height) {
-    if (!t || !t->data || width * height == 0) return;
+// Декодирует бинарные данные из тензора обратно в UTF-8
+void decode_binary_to_utf8(const uint8_t* binary_data, size_t data_len, char* output, size_t max_output_len) {
+    if (!binary_data || !output || max_output_len == 0) {
+        if (output) output[0] = '\0';
+        return;
+    }
     
+    size_t out_pos = 0;
+    size_t in_pos = 0;
+    
+    while (in_pos < data_len && out_pos < max_output_len - 1) {
+        unsigned char c = binary_data[in_pos];
+        
+        // Проверяем, является ли это началом корректного UTF-8 символа
+        uint8_t char_len = 0;
+        if ((c & 0x80) == 0) {
+            char_len = 1;  // ASCII
+        } else if ((c & 0xE0) == 0xC0) {
+            char_len = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            char_len = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            char_len = 4;
+        } else {
+            // Некорректный UTF-8, пропускаем этот байт
+            in_pos++;
+            continue;
+        }
+        
+        // Проверяем, что у нас достаточно байт для полного символа
+        if (in_pos + char_len > data_len) {
+            // Недостаточно данных, выходим
+            break;
+        }
+        
+        // Проверяем, что continuation bytes корректны
+        int valid = 1;
+        for (uint8_t i = 1; i < char_len; i++) {
+            if ((binary_data[in_pos + i] & 0xC0) != 0x80) {
+                valid = 0;
+                break;
+            }
+        }
+        
+        if (!valid) {
+            // Некорректный UTF-8 символ, пропускаем первый байт
+            in_pos++;
+            continue;
+        }
+        
+        // Копируем символ в вывод
+        for (uint8_t i = 0; i < char_len && out_pos < max_output_len - 1; i++) {
+            output[out_pos++] = binary_data[in_pos + i];
+        }
+        
+        in_pos += char_len;
+    }
+    
+    output[out_pos] = '\0';
+}
+
+// Вспомогательная: декодирует тензор в UTF-8 строку
+void decode_tensor_to_utf8(BitTensor* t, char* output, size_t max_len) {
+    if (!t || !t->data || !output || max_len == 0) {
+        if (output) output[0] = '\0';
+        return;
+    }
+    
+    // Вычисляем размер данных тензора в байтах
     uint32_t total_bits = t->rows * t->cols;
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            int idx = y * width + x;
-            uint32_t bit_idx = idx % total_bits;
-            uint8_t bit = BIT_GET(t->data[bit_idx / 8], bit_idx % 8);
-            
-            // Преобразуем бит в значение 0-255
-            uint8_t value = bit ? 255 : 0;
-            
-            // Добавляем влияние активности и резонанса
-            value = (value * t->act) / 255;
-            
-            // Добавляем шум на основе энтропии
-            if (t->ent > 100) {
-                value ^= (rand() % 64);
+    uint32_t total_bytes = (total_bits + 7) / 8;
+    
+    // Декодируем бинарные данные
+    decode_binary_to_utf8(t->data, total_bytes, output, max_len);
+}
+
+// ===== ФУНКЦИЯ ГЕНЕРАЦИИ ОТВЕТА =====
+
+// Новая функция: генерация ответа из внутренних мыслей
+void generate_response_from_thoughts(void) {
+    if (tnsr_count == 0 || working_mem_count == 0) {
+        printf("[Система]: Нет активных мыслей для ответа.\n");
+        return;
+    }
+    
+    // Получаем наиболее активный тензор как "текущую мысль" через новую функцию
+    BitTensor* active_thought = find_significant_tensor(SEARCH_MOST_ACTIVE, NULL);
+    if (!active_thought || active_thought->act < 50) {
+        printf("[Система]: Мысли слишком слабые для ответа.\n");
+        return;
+    }
+    
+    // Получаем связанные тензоры (ассоциации)
+    BitTensor* associations[MAX_LINKS];
+    uint16_t assoc_count = 0;
+    
+    for (uint16_t i = 0; i < lnk_count; i++) {
+        if (lnks[i].src == active_thought && lnks[i].strength > 40 && 
+            lnks[i].tgt->act > 30 && !lnks[i].tgt->dropout) {
+            if (assoc_count < MAX_LINKS) {
+                associations[assoc_count++] = lnks[i].tgt;
             }
+        }
+    }
+    
+// Если связей мало, ищем и используем похожие тензоры для обучения
+if (assoc_count < 3) {
+    for (uint16_t i = 0; i < tnsr_count && assoc_count < 10; i++) {
+        BitTensor* candidate = &tnsrs[i];
+        
+        if (candidate == active_thought || candidate->dropout) continue;
+        
+        // Более мягкая проверка сходства
+        uint8_t similarity = calc_bit_sim(active_thought, candidate);
+        
+        if (similarity > 40 && similarity < 90) {  // Похожи, но не слишком
+            uint8_t activity_score = candidate->act * (100 - candidate->efficiency) / 100;
             
-            pixels[idx] = value;
+            if (activity_score > 20) {
+                associations[assoc_count++] = candidate;
+                
+                // 🔥 КЛЮЧЕВОЕ УЛУЧШЕНИЕ: ИЗУЧАЕМ СХОДСТВО
+                // Создаем временный буфер для обучения
+                uint8_t learning_buffer[200];
+                uint8_t learning_len = 0;
+                
+                // Смешиваем характеристики похожего тензора с активным
+                for (uint8_t j = 0; j < 50 && learning_len < 195; j++) {
+                    uint8_t mix_byte = (active_thought->data[j] ^ candidate->data[j]) | 
+                                      (active_thought->data[j] & candidate->data[j]);
+                    learning_buffer[learning_len++] = mix_byte;
+                }
+                
+                // Добавляем мета-информацию
+                learning_buffer[learning_len++] = similarity;
+                learning_buffer[learning_len++] = candidate->efficiency;
+                learning_buffer[learning_len++] = (active_thought->act + candidate->act) / 2;
+                
+                // 🔥 ВЫЗОВ ФУНКЦИИ ОБУЧЕНИЯ
+                learn_by_binary_update(active_thought, learning_buffer, learning_len);
+                
+                // Увеличиваем резонанс
+                active_thought->res = (active_thought->res + similarity / 4 > RES_MAX) ? 
+                                      RES_MAX : active_thought->res + similarity / 4;
+            }
         }
     }
 }
-
-// 2. Генератор градиента с интерференцией
-void generate_interference_pattern(BitTensor* t, uint8_t* pixels, int width, int height) {
-    if (!t || width * height == 0) return;
     
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            int idx = y * width + x;
-            
-            // Базовый градиент
-            float dx = (float)x / width;
-            float dy = (float)y / height;
-            float gradient = (dx + dy) * 0.5f;
-            
-            // Интерференция от тензора
-            float interference = 0.0f;
-            if (t->data) {
-                uint32_t bit_idx = (x + y * width) % (t->rows * t->cols);
-                uint8_t bit = BIT_GET(t->data[bit_idx / 8], bit_idx % 8);
-                interference = bit ? 0.3f : -0.3f;
+    // Декодируем активную мысль
+    char thought_buffer[MAX_OUTPUT];
+    decode_tensor_to_utf8(active_thought, thought_buffer, sizeof(thought_buffer));
+    
+    // Формируем ответ на основе мыслей
+    printf("[Мышление]: ");
+    
+    // Выводим основную мысль
+    size_t thought_len = strlen(thought_buffer);
+    if (thought_len > 0) {
+        // Выводим до первого нулевого символа или конца строки
+        size_t print_len = thought_len < 100 ? thought_len : 100;
+        for (size_t i = 0; i < print_len && thought_buffer[i] != '\0'; i++) {
+            // Пропускаем только управляющие символы
+            if (thought_buffer[i] >= 32 || thought_buffer[i] == '\n' || thought_buffer[i] == '\t') {
+                putchar(thought_buffer[i]);
+            } else {
+                // Заменяем непечатаемые символы на '?'
+                putchar('?');
             }
-            
-            // Модуляция активностью и резонансом
-            float mod = (t->act / 255.0f) * (t->res / 255.0f);
-            float value_f = (gradient + interference * mod) * 255.0f;
-            
-            // Ограничение
-            if (value_f < 0) value_f = 0;
-            if (value_f > 255) value_f = 255;
-            
-            pixels[idx] = (uint8_t)value_f;
         }
     }
-}
-
-// 3. Генератор фрактальных паттернов
-void generate_fractal_pattern(BitTensor* t, uint8_t* pixels, int width, int height) {
-    if (width * height == 0) return;
     
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            int idx = y * width + x;
-            
-            // Фрактальный шум
-            float nx = (float)x / width * 10.0f;
-            float ny = (float)y / height * 10.0f;
-            float value_f = 0.0f;
-            float freq = 1.0f;
-            float amp = 1.0f;
-            
-            for (int i = 0; i < 4; i++) {
-                value_f += sin(nx * freq) * cos(ny * freq) * amp;
-                freq *= 2.0f;
-                amp *= 0.5f;
-            }
-            
-            // Нормализация
-            value_f = (value_f + 1.0f) * 0.5f * 255.0f;
-            
-            // Влияние тензора
-            if (t && t->data) {
-                uint32_t bit_idx = (x ^ y) % (t->rows * t->cols);
-                if (BIT_GET(t->data[bit_idx / 8], bit_idx % 8)) {
-                    value_f = 255 - value_f; // Инверсия
+    // Добавляем ассоциации (случайный выбор)
+    if (assoc_count > 0) {
+        printf(" | Связи: ");
+        uint8_t printed_assocs = 0;
+        for (uint8_t i = 0; i < assoc_count && printed_assocs < 3; i++) {
+            // Случайно выбираем ассоциации для разнообразия
+            if (rand() % 100 < 40) {
+                char assoc_buf[100];
+                decode_tensor_to_utf8(associations[i], assoc_buf, sizeof(assoc_buf));
+                size_t assoc_len = strlen(assoc_buf);
+                if (assoc_len > 0 && assoc_len < 30) {
+                    if (printed_assocs > 0) printf(", ");
+                    
+                    // Выводим только читаемые символы
+                    for (size_t j = 0; j < assoc_len && j < 20; j++) {
+                        if (assoc_buf[j] >= 32 || assoc_buf[j] == '\n' || assoc_buf[j] == '\t') {
+                            putchar(assoc_buf[j]);
+                        } else {
+                            putchar('?');
+                        }
+                    }
+                    printed_assocs++;
                 }
             }
-            
-            pixels[idx] = (uint8_t)value_f;
         }
     }
+    
+    // Добавляем рефлексию
+    if (active_thought->stab > 150 && active_thought->res > 100) {
+        printf(" [рефлексия]");
+    }
+    
+    // Статистика мысли
+    printf("\n[Стат: act=%u, eff=%u, res=%u, связей=%u]\n", 
+           active_thought->act, active_thought->efficiency, 
+           active_thought->res, assoc_count);
+    
+    // Обновляем систему после генерации мысли
+    active_thought->act = (active_thought->act * 9) / 10; // Снижаем активность после "озвучивания"
+    active_thought->lu = (uint32_t)time(NULL);
+    
+    // Сохраняем мысль в память
+    save_tnsr(active_thought);
 }
 
-// 4. Вспомогательная функция: рисование линии
-void draw_line(uint8_t* pixels, int width, int height, 
-               int x1, int y1, int x2, int y2, int thickness, uint8_t value) {
-    // Алгоритм Брезенхэма
-    int dx = abs(x2 - x1);
-    int dy = abs(y2 - y1);
-    int sx = (x1 < x2) ? 1 : -1;
-    int sy = (y1 < y2) ? 1 : -1;
-    int err = dx - dy;
+// ===== УНИВЕРСАЛЬНАЯ ФУНКЦИЯ МНОГОСТРОЧНОГО ВВОДА =====
+
+// Читает многострочный ввод до пустой строки (как в Vim)
+// Enter = новая строка, Двойной Enter = отправка
+int read_vim_style_input(char* buffer, size_t max_len, const char* prompt) {
+    if (!buffer || max_len == 0) return 0;
+    
+    buffer[0] = '\0';
+    size_t total_len = 0;
+    char line[256];
+    int line_number = 0;
+    int empty_line_count = 0;
+    
+    printf("%s (двойной Enter для отправки):\n", prompt);
     
     while (1) {
-        // Рисуем пиксель с толщиной
-        for (int ty = -thickness/2; ty <= thickness/2; ty++) {
-            for (int tx = -thickness/2; tx <= thickness/2; tx++) {
-                int px = x1 + tx;
-                int py = y1 + ty;
-                if (px >= 0 && px < width && py >= 0 && py < height) {
-                    pixels[py * width + px] = value;
-                }
+        // Показываем номер строки (если это не первая строка)
+        if (line_number > 0) {
+            printf("%d> ", line_number + 1);
+        } else {
+            printf("> ");
+        }
+        
+        fflush(stdout);
+        
+        if (!fgets(line, sizeof(line), stdin)) {
+            if (total_len > 0) break;  // EOF, но есть данные
+            return 0;  // EOF без данных
+        }
+        
+        size_t line_len = strlen(line);
+        // Убираем символ новой строки
+        if (line_len > 0 && line[line_len - 1] == '\n') {
+            line[--line_len] = '\0';
+        }
+        
+        // Если пустая строка
+        if (line_len == 0) {
+            empty_line_count++;
+            
+            // Если это вторая пустая строка подряд - отправляем
+            if (empty_line_count >= 2) {
+                break;
             }
-        }
-        
-        if (x1 == x2 && y1 == y2) break;
-        int e2 = 2 * err;
-        if (e2 > -dy) { err -= dy; x1 += sx; }
-        if (e2 < dx) { err += dx; y1 += sy; }
-    }
-}
-
-// 5. Вспомогательная функция: рисование круга
-void draw_circle(uint8_t* pixels, int width, int height, 
-                 int cx, int cy, int radius, uint8_t value) {
-    for (int y = -radius; y <= radius; y++) {
-        for (int x = -radius; x <= radius; x++) {
-            if (x*x + y*y <= radius*radius) {
-                int px = cx + x;
-                int py = cy + y;
-                if (px >= 0 && px < width && py >= 0 && py < height) {
-                    pixels[py * width + px] = value;
-                }
+            
+            // Первая пустая строка - добавляем \n
+            if (total_len > 0 && total_len + 1 < max_len) {
+                buffer[total_len++] = '\n';
+                buffer[total_len] = '\0';
+                line_number++;
             }
-        }
-    }
-}
-
-// 6. Генератор связей между тензорами (визуализация графа)
-void generate_link_visualization(uint8_t* pixels, int width, int height) {
-    if (lnk_count == 0 || width * height == 0) return;
-    
-    // Очистка
-    memset(pixels, 0, width * height);
-    
-    // Позиции тензоров на изображении
-    float tensor_x[MAX_TENSORS];
-    float tensor_y[MAX_TENSORS];
-    
-    // Распределяем тензоры по кругу
-    for (uint16_t i = 0; i < tnsr_count && i < MAX_TENSORS; i++) {
-        float angle = (2 * M_PI * i) / tnsr_count;
-        float radius = 0.4f;
-        tensor_x[i] = 0.5f + cos(angle) * radius;
-        tensor_y[i] = 0.5f + sin(angle) * radius;
-    }
-    
-    // Рисуем связи
-    for (uint16_t i = 0; i < lnk_count; i++) {
-        BitLink* link = &lnks[i];
-        uint16_t src_idx = tensor_to_index(link->src);
-        uint16_t tgt_idx = tensor_to_index(link->tgt);
-        
-        if (src_idx >= tnsr_count || tgt_idx >= tnsr_count) continue;
-        
-        int x1 = (int)(tensor_x[src_idx] * width);
-        int y1 = (int)(tensor_y[src_idx] * height);
-        int x2 = (int)(tensor_x[tgt_idx] * width);
-        int y2 = (int)(tensor_y[tgt_idx] * height);
-        
-        // Толщина линии зависит от силы связи
-        int thickness = link->strength / 64;
-        if (thickness < 1) thickness = 1;
-        
-        // Цвет зависит от успешности
-        uint8_t value = (link->success_count * 255) / (link->use_count + 1);
-        
-        // Рисуем линию
-        draw_line(pixels, width, height, x1, y1, x2, y2, thickness, value);
-    }
-    
-    // Рисуем узлы (тензоры)
-    for (uint16_t i = 0; i < tnsr_count && i < MAX_TENSORS; i++) {
-        int x = (int)(tensor_x[i] * width);
-        int y = (int)(tensor_y[i] * height);
-        int radius = tnsrs[i].act / 32;
-        if (radius < 2) radius = 2;
-        if (radius > 20) radius = 20;
-        
-        draw_circle(pixels, width, height, x, y, radius, 255);
-    }
-}
-
-// 7. Сохранение в PGM (Portable Graymap)
-int save_pgm(const char* filename, uint8_t* pixels, int width, int height) {
-    FILE* f = fopen(filename, "wb");
-    if (!f) return -1;
-    
-    fprintf(f, "P5\n%d %d\n255\n", width, height);
-    fwrite(pixels, 1, width * height, f);
-    fclose(f);
-    
-    return 0;
-}
-
-// 8. Сохранение в PPM (Portable Pixmap) - RGB
-int save_ppm(const char* filename, uint8_t* pixels_r, uint8_t* pixels_g, 
-             uint8_t* pixels_b, int width, int height) {
-    FILE* f = fopen(filename, "wb");
-    if (!f) return -1;
-    
-    fprintf(f, "P6\n%d %d\n255\n", width, height);
-    
-    for (int i = 0; i < width * height; i++) {
-        fputc(pixels_r[i], f);
-        fputc(pixels_g[i], f);
-        fputc(pixels_b[i], f);
-    }
-    
-    fclose(f);
-    return 0;
-}
-
-// 9. Генератор цветного изображения из трёх тензоров (RGB)
-void generate_rgb_from_tensors(BitTensor* r_t, BitTensor* g_t, BitTensor* b_t,
-                               uint8_t* r_pixels, uint8_t* g_pixels, uint8_t* b_pixels,
-                               int width, int height) {
-    // Генерируем каждый канал
-    if (r_t) generate_noise_from_tensor(r_t, r_pixels, width, height);
-    else memset(r_pixels, 128, width * height);
-    
-    if (g_t) generate_interference_pattern(g_t, g_pixels, width, height);
-    else memset(g_pixels, 128, width * height);
-    
-    if (b_t) generate_fractal_pattern(b_t, b_pixels, width, height);
-    else memset(b_pixels, 128, width * height);
-}
-
-// 10. Создание гиф-анимации (серия PGM)
-void create_animation_series(const char* basename, int frames, int width, int height) {
-    printf("Создание анимации (%d кадров)...\n", frames);
-    
-    uint8_t* pixels = malloc(width * height);
-    if (!pixels) return;
-    
-    for (int frame = 0; frame < frames; frame++) {
-        // Выбираем случайный тензор для этого кадра
-        BitTensor* t = NULL;
-        if (tnsr_count > 0) {
-            t = &tnsrs[rand() % tnsr_count];
+            continue;
         }
         
-        // Генерируем паттерн
-        generate_fractal_pattern(t, pixels, width, height);
+        // Сбрасываем счетчик пустых строк
+        empty_line_count = 0;
         
-        // Сохраняем кадр
-        char filename[256];
-        snprintf(filename, sizeof(filename), "%s_%04d.pgm", basename, frame);
-        save_pgm(filename, pixels, width, height);
-        
-        // Обновляем мышление между кадрами
-        update_thought_stream();
-        
-        if (frame % 10 == 0) {
-            printf("  Кадр %d/%d\n", frame + 1, frames);
+        // Проверяем, достаточно ли места
+        if (total_len + line_len + 2 < max_len) {
+            if (total_len > 0) {
+                buffer[total_len++] = '\n';  // Добавляем разделитель строк
+            }
+            strcpy(buffer + total_len, line);
+            total_len += line_len;
+            line_number++;
+        } else {
+            printf("[!] Достигнут предел длины ввода\n");
+            break;
         }
     }
     
-    free(pixels);
-    printf("Анимация сохранена в %s_*.pgm\n", basename);
-}
-
-// ============================================
-// УТИЛИТЫ ДЛЯ РАБОТЫ С ТЕНЗОРАМИ
-// ============================================
-
-// Поиск тензора по характеристикам
-BitTensor* find_tensor_by_features(uint8_t min_act, uint8_t min_res, uint8_t max_ent) {
-    BitTensor* best = NULL;
-    uint32_t best_score = 0;
-    
-    for (uint16_t i = 0; i < tnsr_count; i++) {
-        BitTensor* t = &tnsrs[i];
-        if (t->act < min_act || t->res < min_res || t->ent > max_ent) continue;
-        
-        uint32_t score = (uint32_t)t->act * t->res * (255 - t->ent);
-        if (score > best_score) {
-            best_score = score;
-            best = t;
-        }
+    // Убираем лишний \n в конце, если он есть
+    if (total_len > 0 && buffer[total_len - 1] == '\n') {
+        buffer[--total_len] = '\0';
     }
     
-    return best;
+    return total_len > 0 ? 1 : 0;
 }
 
-// Создание нового тензора из описания
-BitTensor* create_tensor_from_description(const char* desc) {
-    // Создаём тензор
-    BitTensor* t = create_tnsr(8, strlen(desc) * 3);
-    if (!t) return NULL;
+// ===== ОБРАБОТКА ВВОДА ПОЛЬЗОВАТЕЛЯ =====
+
+void process_user_input(const char* input_text) {
+    if (!input_text || !*input_text) {
+        printf("[!] Пустой ввод\n");
+        return;
+    }
     
-    // Кодируем описание
-    encode_tnsr(t, (const uint8_t*)desc, strlen(desc));
+    printf("\n[Обработка %zu символов...]\n", strlen(input_text));
     
-    // Настраиваем параметры на основе описания
-    t->act = 180;
-    t->res = 200;
-    t->ent = calc_bit_ent(t);
-    t->efficiency = calculate_efficiency(t);
+    // Кодируем UTF-8 в бинарный формат для обработки
+    uint8_t encoded_data[MAX_INPUT * 4]; // UTF-8 может быть до 4 байт на символ
+    size_t encoded_len = 0;
     
-    // Добавляем в рабочую память
-    add_to_working_memory(t);
+    encode_utf8_to_binary(input_text, encoded_data, &encoded_len, sizeof(encoded_data));
     
-    return t;
+    // Передаем закодированные данные в ядро
+    proc_bit_input_raw(encoded_data, (uint16_t)encoded_len);
+    
+    // Генерируем ответ
+    update_thought_stream();
+    generate_response_from_thoughts();
 }
 
-// ============================================
-// ГЛАВНАЯ ПРОГРАММА - ГЕНЕРАТОР ИЗОБРАЖЕНИЙ
-// ============================================
+// ===== ГЛАВНАЯ ФУНКЦИЯ =====
 
 int main(void) {
+    // Устанавливаем локаль для поддержки UTF-8
+    setlocale(LC_ALL, "en_US.UTF-8");
+    
     srand((uint32_t)time(NULL));
     memset(&sstate, 0, sizeof(BitSystemState));
     memset(working_mem, 0, sizeof(working_mem));
     sstate.coh = 128;
     sstate.energy = 128;
 
-    // Загрузка состояния
-    if (load_state_from_file("art_memory.bin") < 0) {
-        printf("[WARN] Не удалось загрузить состояние — начинаем с нуля.\n");
-        // Создаём начальные тензоры для искусства
-        create_tensor_from_description("cosmic noise");
-        create_tensor_from_description("organic patterns");
-        create_tensor_from_description("digital dreams");
-        create_tensor_from_description("fractal universe");
+    // === ЗАГРУЗКА СОСТОЯНИЯ ===
+    if (load_state_from_file("memory.bin") < 0) {
+        printf("[WARN] Не удалось загрузить состояние — запуск с чистого листа.\n");
     } else {
-        printf("[LOAD] Художественное состояние восстановлено.\n");
+        printf("[LOAD] Состояние восстановлено.\n");
     }
 
-    printf("=== Tensor Art Generator v1.0 ===\n");
-    printf("Использует BitTensor AGI для генерации изображений\n");
-    printf("Тензоров: %u, Связей: %u\n", tnsr_count, lnk_count);
-    printf("\nДоступные команды:\n");
-    printf("  /noise [W] [H] [name]    — Шумовой паттерн\n");
-    printf("  /fractal [W] [H] [name]  — Фрактальный паттерн\n");
-    printf("  /interf [W] [H] [name]   — Интерференция\n");
-    printf("  /links [W] [H] [name]    — Визуализация связей\n");
-    printf("  /rgb [W] [H] [name]      — Цветное RGB изображение\n");
-    printf("  /anim [W] [H] [frames]   — Анимация\n");
-    printf("  /batch [N] [W] [H]       — Пакетная генерация\n");
-    printf("  /learn [текст]           — Обучить на тексте\n");
-    printf("  /tensors                 — Список тензоров\n");
-    printf("  /stats                   — Статистика\n");
-    printf("  /clear                   — Очистить\n");
-    printf("  /exit                    — Выход с сохранением\n");
+    printf("=== Низкоуровневая AGI v2.1 ===\n");
+    printf("Мыслящие тензоры, резонансные петли, XOR/AND/NOT обучение\n");
+    printf("UTF-8 кодирование для обработки и отображения\n");
+    printf("Vim-стиль ввода (двойной Enter для отправки)\n");
+    printf("Цель эффективности: %u\n", goals.target_efficiency);
+    printf("Дропаут: %s\n", goals.dropout_enabled ? "ON" : "OFF");
+    printf("\n");
+    printf("Использование:\n");
+    printf("  • Вводите текст, нажимайте Enter для новой строки\n");
+    printf("  • Дважды нажмите Enter для отправки сообщения\n");
+    printf("  • Команды начинаются с /\n");
+    printf("\n");
+    printf("Команды:\n");
+    printf("  /raw      - байтовый ввод (старый режим)\n");
+    printf("  /think    - принудительная генерация мысли\n");
+    printf("  /stats    - статистика системы\n");
+    printf("  /links    - показать связи\n");
+    printf("  /echo     - последняя активная мысль\n");
+    printf("  /help     - справка\n");
+    printf("  /exit     - выход с сохранением\n");
     printf("\n");
 
+    char input_buffer[MAX_INPUT];
+    uint8_t raw_buffer[MAX_INPUT];
+    uint8_t encoded_buffer[MAX_INPUT * 4];
+    size_t encoded_len;
     char line[256];
+    uint32_t last_response_time = 0;
 
     while (1) {
-        printf("\nart> ");
-        fflush(stdout);
-        if (!fgets(line, sizeof(line), stdin)) break;
-
-        size_t line_len = strlen(line);
-        if (line_len > 0 && line[line_len - 1] == '\n') {
-            line[--line_len] = '\0';
-        }
-
-        // ===== КОМАНДЫ ГЕНЕРАЦИИ =====
-        if (strncmp(line, "/noise", 6) == 0) {
-            int width = 512, height = 512;
-            char name[256] = "noise";
-            
-            if (line_len > 6) {
-                sscanf(line + 6, "%d %d %255s", &width, &height, name);
-            }
-            
-            if (width <= 0 || height <= 0) {
-                printf("Неверные размеры\n");
-                continue;
-            }
-            
-            // Находим или создаём тензор
-            BitTensor* t = get_most_active_tensor();
-            if (!t && tnsr_count > 0) t = &tnsrs[0];
-            
-            // Генерируем изображение
-            uint8_t* pixels = malloc(width * height);
-            generate_noise_from_tensor(t, pixels, width, height);
-            
-            // Сохраняем
-            char filename[256];
-            snprintf(filename, sizeof(filename), "%s.pgm", name);
-            save_pgm(filename, pixels, width, height);
-            free(pixels);
-            
-            printf("Сохранено: %s (%dx%d)\n", filename, width, height);
-        }
-        else if (strncmp(line, "/fractal", 8) == 0) {
-            int width = 512, height = 512;
-            char name[256] = "fractal";
-            
-            if (line_len > 8) {
-                sscanf(line + 8, "%d %d %255s", &width, &height, name);
-            }
-            
-            // Находим тензор с высокой энтропией
-            BitTensor* t = find_tensor_by_features(100, 100, 200);
-            
-            uint8_t* pixels = malloc(width * height);
-            generate_fractal_pattern(t, pixels, width, height);
-            
-            char filename[256];
-            snprintf(filename, sizeof(filename), "%s.pgm", name);
-            save_pgm(filename, pixels, width, height);
-            free(pixels);
-            
-            printf("Сохранено: %s\n", filename);
-        }
-        else if (strncmp(line, "/interf", 7) == 0) {
-            int width = 512, height = 512;
-            char name[256] = "interference";
-            
-            if (line_len > 7) {
-                sscanf(line + 7, "%d %d %255s", &width, &height, name);
-            }
-            
-            BitTensor* t = get_resonant_tensor();
-            
-            uint8_t* pixels = malloc(width * height);
-            generate_interference_pattern(t, pixels, width, height);
-            
-            char filename[256];
-            snprintf(filename, sizeof(filename), "%s.pgm", name);
-            save_pgm(filename, pixels, width, height);
-            free(pixels);
-            
-            printf("Сохранено: %s\n", filename);
-        }
-        else if (strncmp(line, "/links", 6) == 0) {
-            int width = 800, height = 600;
-            char name[256] = "links";
-            
-            if (line_len > 6) {
-                sscanf(line + 6, "%d %d %255s", &width, &height, name);
-            }
-            
-            if (lnk_count == 0) {
-                printf("Нет связей для визуализации\n");
-                continue;
-            }
-            
-            uint8_t* pixels = malloc(width * height);
-            generate_link_visualization(pixels, width, height);
-            
-            char filename[256];
-            snprintf(filename, sizeof(filename), "%s.pgm", name);
-            save_pgm(filename, pixels, width, height);
-            free(pixels);
-            
-            printf("Сохранено: %s (связей: %u)\n", filename, lnk_count);
-        }
-        else if (strncmp(line, "/rgb", 4) == 0) {
-            int width = 512, height = 512;
-            char name[256] = "rgb";
-            
-            if (line_len > 4) {
-                sscanf(line + 4, "%d %d %255s", &width, &height, name);
-            }
-            
-            // Находим три разных тензора для RGB
-            BitTensor* r_t = find_tensor_by_features(150, 100, 150);
-            BitTensor* g_t = find_tensor_by_features(100, 150, 150);
-            BitTensor* b_t = find_tensor_by_features(100, 100, 200);
-            
-            uint8_t* r_pixels = malloc(width * height);
-            uint8_t* g_pixels = malloc(width * height);
-            uint8_t* b_pixels = malloc(width * height);
-            
-            generate_rgb_from_tensors(r_t, g_t, b_t, 
-                                     r_pixels, g_pixels, b_pixels,
-                                     width, height);
-            
-            char filename[256];
-            snprintf(filename, sizeof(filename), "%s.ppm", name);
-            save_ppm(filename, r_pixels, g_pixels, b_pixels, width, height);
-            
-            free(r_pixels);
-            free(g_pixels);
-            free(b_pixels);
-            
-            printf("Сохранено: %s (RGB)\n", filename);
-        }
-        else if (strncmp(line, "/anim", 5) == 0) {
-            int width = 256, height = 256, frames = 30;
-            
-            if (line_len > 5) {
-                sscanf(line + 5, "%d %d %d", &width, &height, &frames);
-            }
-            
-            if (frames > 1000) frames = 1000;
-            
-            create_animation_series("animation", frames, width, height);
-        }
-        else if (strncmp(line, "/batch", 6) == 0) {
-            int count = 10, width = 256, height = 256;
-            
-            if (line_len > 6) {
-                sscanf(line + 6, "%d %d %d", &count, &width, &height);
-            }
-            
-            if (count > 100) count = 100;
-            
-            printf("Генерация %d изображений...\n", count);
-            for (int i = 0; i < count; i++) {
-                BitTensor* t = NULL;
-                if (tnsr_count > 0) {
-                    t = &tnsrs[rand() % tnsr_count];
+        // Всегда используем многострочный ввод (Vim-стиль)
+        if (read_vim_style_input(input_buffer, sizeof(input_buffer), "Введите текст")) {
+            // Проверяем, не команда ли это
+            if (input_buffer[0] == '/' && input_buffer[1] != '\0') {
+                // Обрабатываем команду
+                if (strcmp(input_buffer, "/exit") == 0 || strcmp(input_buffer, "/quit") == 0) {
+                    // === СОХРАНЕНИЕ ПЕРЕД ВЫХОДОМ ===
+                    if (save_state_to_file("memory.bin") < 0) {
+                        printf("[ERROR] Не удалось сохранить состояние!\n");
+                    } else {
+                        printf("[SAVE] Состояние сохранено в memory.bin\n");
+                    }
+                    break;
                 }
                 
-                uint8_t* pixels = malloc(width * height);
-                
-                // Чередуем генераторы
-                switch (i % 3) {
-                    case 0: generate_noise_from_tensor(t, pixels, width, height); break;
-                    case 1: generate_interference_pattern(t, pixels, width, height); break;
-                    case 2: generate_fractal_pattern(t, pixels, width, height); break;
-                }
-                
-                char filename[256];
-                snprintf(filename, sizeof(filename), "batch_%04d.pgm", i);
-                save_pgm(filename, pixels, width, height);
-                
-                free(pixels);
-                
-                // Обновляем мышление
-                if (i % 5 == 0) {
+                else if (strcmp(input_buffer, "/think") == 0) {
+                    // Команда для принудительной генерации мысли
                     update_thought_stream();
+                    generate_response_from_thoughts();
                 }
                 
-                if (i % 10 == 0) {
-                    printf("  %d/%d\n", i + 1, count);
+                else if (strcmp(input_buffer, "/raw") == 0) {
+                    // Байтовый ввод (старая функция)
+                    printf("Длина в байтах: ");
+                    fflush(stdout);
+                    if (!fgets(line, sizeof(line), stdin)) break;
+                    
+                    long n = strtol(line, NULL, 10);
+                    if (n <= 0 || n > MAX_INPUT) {
+                        printf("Неверная длина (1..%d)\n", MAX_INPUT);
+                        continue;
+                    }
+                    
+                    printf("Ожидаем %ld байт:\n", n);
+                    fflush(stdout);
+                    size_t input_len = fread(raw_buffer, 1, (size_t)n, stdin);
+                    if (input_len == 0) {
+                        printf("[!] Нет данных\n");
+                        continue;
+                    }
+                    
+                    printf("[OK] Принято %zu байт\n", input_len);
+                    proc_bit_input_raw(raw_buffer, (uint16_t)input_len);
+                    
+                    // Генерируем ответ после обработки
+                    update_thought_stream();
+                    generate_response_from_thoughts();
                 }
-            }
-            printf("Готово!\n");
-        }
-        else if (strncmp(line, "/learn ", 7) == 0) {
-            const char* text = line + 7;
-            proc_bit_input(text);
-            printf("Обучаемся на: \"%s\"\n", text);
-        }
-        else if (strcmp(line, "/tensors") == 0) {
-            printf("Тензоры (%u):\n", tnsr_count);
-            for (uint16_t i = 0; i < tnsr_count; i++) {
-                BitTensor* t = &tnsrs[i];
-                char buf[100];
-                decode_tnsr(t, buf, sizeof(buf));
-                printf("  [%3u] Act:%3u Res:%3u Ent:%3u Eff:%3u: %.30s\n",
-                       i, t->act, t->res, t->ent, t->efficiency, buf);
-            }
-        }
-        else if (strcmp(line, "/stats") == 0) {
-            printf("=== Статистика искусства ===\n");
-            printf("Тензоры: %u\n", tnsr_count);
-            printf("Связи: %u\n", lnk_count);
-            printf("Память: %u\n", memo_size);
-            printf("Резонанс системы: %u\n", sys_res);
-            
-            uint16_t active = 0;
-            uint32_t total_ent = 0;
-            for (uint16_t i = 0; i < tnsr_count; i++) {
-                if (tnsrs[i].act > 50) active++;
-                total_ent += tnsrs[i].ent;
-            }
-            printf("Активные тензоры: %u\n", active);
-            printf("Средняя энтропия: %u\n", tnsr_count > 0 ? total_ent / tnsr_count : 0);
-            printf("Цель эффективности: %u\n", goals.target_efficiency);
-        }
-        else if (strcmp(line, "/clear") == 0) {
-            for (uint16_t i = 0; i < tnsr_count; i++) { 
-                if (tnsrs[i].data) free(tnsrs[i].data); 
-            }
-            for (uint16_t i = 0; i < tt_count; i++) { 
-                if (t_tnsrs[i].data) free(t_tnsrs[i].data); 
-                if (t_tnsrs[i].tensor_indices) free(t_tnsrs[i].tensor_indices);
-            }
-            tnsr_count = 0; 
-            tt_count = 0; 
-            lnk_count = 0; 
-            memo_size = 0;
-            working_mem_count = 0;
-            sys_res = RES_HALF;
-            goals.target_efficiency = 180;
-            
-            // Создаём новые художественные тензоры
-            create_tensor_from_description("abstract art");
-            create_tensor_from_description("generative design");
-            create_tensor_from_description("neural patterns");
-            
-            printf("Система очищена, созданы новые художественные тензоры.\n");
-        }
-        else if (strcmp(line, "/exit") == 0) {
-            if (save_state_to_file("art_memory.bin") < 0) {
-                printf("[ERROR] Не удалось сохранить состояние!\n");
+                
+                else if (strcmp(input_buffer, "/goal") == 0) {
+                    printf("Цель эффективности: %u\n", goals.target_efficiency);
+                    printf("Прирост эффективности: %u\n", goals.efficiency_gain);
+                    printf("Режим экономии: %s\n", goals.energy_saving_mode ? "ON" : "OFF");
+                    printf("Общая стоимость: %u\n", goals.total_compute_cost);
+                }
+                
+                else if (strcmp(input_buffer, "/dropout") == 0) {
+                    goals.dropout_enabled = !goals.dropout_enabled;
+                    printf("Дропаут: %s\n", goals.dropout_enabled ? "ON" : "OFF");
+                }
+                
+                else if (strcmp(input_buffer, "/workmem") == 0) {
+                    printf("Рабочая память (%u записей):\n", working_mem_count);
+                    for (uint8_t i = 0; i < working_mem_count; i++) {
+                        if (working_mem[i].tensor) {
+                            char buf[100];
+                            decode_tensor_to_utf8(working_mem[i].tensor, buf, sizeof(buf));
+                            // Очищаем непечатаемые символы
+                            for (size_t j = 0; buf[j] != '\0'; j++) {
+                                if (buf[j] < 32 && buf[j] != '\n' && buf[j] != '\t') {
+                                    buf[j] = '?';
+                                }
+                            }
+                            printf("  [%u] prio:%u acc:%u: %.30s\n", 
+                                   i, working_mem[i].priority, 
+                                   working_mem[i].access_count, buf);
+                        }
+                    }
+                }
+                
+                else if (strcmp(input_buffer, "/stats") == 0) {
+                    printf("Тензоры: %u\n", tnsr_count);
+                    printf("Связи: %u\n", lnk_count);
+                    printf("Записи памяти: %u\n", memo_size);
+                    printf("Тензор-Тензоры: %u\n", tt_count);
+                    printf("Резонанс системы: %u\n", sys_res);
+                    uint16_t active = 0;
+                    uint16_t dropout = 0;
+                    uint32_t total_eff = 0;
+                    for (uint16_t i = 0; i < tnsr_count; i++) {
+                        if (tnsrs[i].act > 50) active++;
+                        if (tnsrs[i].dropout) dropout++;
+                        total_eff += tnsrs[i].efficiency;
+                    }
+                    printf("Активные тензоры: %u\n", active);
+                    printf("Тензоры в дропауте: %u\n", dropout);
+                    if (tnsr_count > 0) {
+                        printf("Средняя эффективность: %u\n", (uint32_t)total_eff / tnsr_count);
+                    }
+                }
+                
+                else if (strcmp(input_buffer, "/links") == 0) {
+                    printf("Связи (%u всего):\n", lnk_count);
+                    for (uint16_t i = 0; i < lnk_count; i++) {
+                        char src_buf[50], tgt_buf[50];
+                        decode_tensor_to_utf8(lnks[i].src, src_buf, sizeof(src_buf));
+                        decode_tensor_to_utf8(lnks[i].tgt, tgt_buf, sizeof(tgt_buf));
+                        
+                        // Очищаем непечатаемые символы
+                        for (size_t j = 0; src_buf[j] != '\0'; j++) {
+                            if (src_buf[j] < 32 && src_buf[j] != '\n' && src_buf[j] != '\t') {
+                                src_buf[j] = '?';
+                            }
+                        }
+                        for (size_t j = 0; tgt_buf[j] != '\0'; j++) {
+                            if (tgt_buf[j] < 32 && tgt_buf[j] != '\n' && tgt_buf[j] != '\t') {
+                                tgt_buf[j] = '?';
+                            }
+                        }
+                        
+                        printf("  [%u] str:%u use:%u succ:%u: %.20s -> %.20s\n", 
+                               i, lnks[i].strength, lnks[i].use_count, 
+                               lnks[i].success_count, src_buf, tgt_buf);
+                    }
+                }
+                
+                else if (strcmp(input_buffer, "/clear") == 0) {
+                    for (uint16_t i = 0; i < tnsr_count; i++) { 
+                        if (tnsrs[i].data) free(tnsrs[i].data); 
+                    }
+                    for (uint16_t i = 0; i < tt_count; i++) { 
+                        if (t_tnsrs[i].data) free(t_tnsrs[i].data); 
+                        if (t_tnsrs[i].tensor_indices) free(t_tnsrs[i].tensor_indices);
+                    }
+                    tnsr_count = 0; 
+                    tt_count = 0; 
+                    lnk_count = 0; 
+                    memo_size = 0;
+                    working_mem_count = 0;
+                    sys_res = RES_HALF;
+                    goals.target_efficiency = 180;
+                    printf("Система очищена.\n");
+                }
+                
+                else if (strcmp(input_buffer, "/echo") == 0) {
+                    // Эхо-тест: декодирует последний активный тензор
+                    // Используем новую функцию для поиска
+                    BitTensor* last_active = find_significant_tensor(SEARCH_MOST_ACTIVE, NULL);
+                    if (last_active) {
+                        char buf[MAX_OUTPUT];
+                        decode_tensor_to_utf8(last_active, buf, sizeof(buf));
+                        
+                        // Очищаем непечатаемые символы
+                        for (size_t j = 0; buf[j] != '\0'; j++) {
+                            if (buf[j] < 32 && buf[j] != '\n' && buf[j] != '\t') {
+                                buf[j] = '?';
+                            }
+                        }
+                        
+                        printf("Последняя активная мысль: %s\n", buf);
+                        printf("Act: %u, Res: %u, Eff: %u\n", 
+                               last_active->act, last_active->res, last_active->efficiency);
+                    } else {
+                        printf("Нет активных мыслей\n");
+                    }
+                }
+                
+                else if (strcmp(input_buffer, "/test") == 0) {
+                    // Тест UTF-8 кодирования/декодирования
+                    printf("Тест UTF-8 кодирования:\n");
+                    const char* test_str = "Привет мир! Hello 世界! 😊";
+                    printf("Оригинал: %s\n", test_str);
+                    
+                    // Кодируем
+                    encode_utf8_to_binary(test_str, encoded_buffer, &encoded_len, sizeof(encoded_buffer));
+                    printf("Закодировано: %zu байт\n", encoded_len);
+                    
+                    // Декодируем обратно
+                    char decoded[MAX_OUTPUT];
+                    decode_binary_to_utf8(encoded_buffer, encoded_len, decoded, sizeof(decoded));
+                    printf("Декодировано: %s\n", decoded);
+                }
+                
+                else if (strcmp(input_buffer, "/help") == 0) {
+                    printf("справка:\n");
+                    printf("  /help     - эта справка\n");
+                    printf("  /raw      - байтовый ввод\n");
+                    printf("  /think    - генерация мысли\n");
+                    printf("  /stats    - статистика\n");
+                    printf("  /workmem  - рабочая память\n");
+                    printf("  /links    - список связей\n");
+                    printf("  /echo     - последняя мысль\n");
+                    printf("  /clear    - очистка системы\n");
+                    printf("  /test     - тест UTF-8\n");
+                    printf("  /exit     - выход\n");
+                }
+                
+                else {
+                    printf("Неизвестная команда. Используйте /help для списка команд\n");
+                }
             } else {
-                printf("[SAVE] Художественное состояние сохранено.\n");
-            }
-            break;
-        }
-        else if (line_len > 0 && line[0] == '/') {
-            printf("Неизвестная команда. Введите /help для списка команд.\n");
-        }
-        else if (line_len > 0) {
-            // Текст как художественное описание
-            BitTensor* t = create_tensor_from_description(line);
-            if (t) {
-                printf("Создан художественный тензор из: \"%s\"\n", line);
-                printf("Активность: %u, Резонанс: %u, Энтропия: %u\n",
-                       t->act, t->res, t->ent);
+                // Обычный текстовый ввод
+                process_user_input(input_buffer);
             }
         }
 
-        // ===== ФОНОВОЕ МЫШЛЕНИЕ =====
-        update_thought_stream();
+        // === АВТОМАТИЧЕСКОЕ ОБНОВЛЕНИЕ МЫШЛЕНИЯ ===
+        uint32_t current_time = (uint32_t)time(NULL);
+        if (current_time - last_response_time > 45) {
+            // Автоматическая генерация мысли каждые 45 секунд простоя
+            update_thought_stream();
+            if (rand() % 100 < 15) { // 15% шанс на спонтанную мысль
+                printf("\n[Спонтанная мысль]: ");
+                generate_response_from_thoughts();
+            }
+            last_response_time = current_time;
+        }
     }
 
-    printf("\nTensor Art Generator завершён.\n");
+    printf("\nВыход. Финальная цель эффективности: %u\n", goals.target_efficiency);
 
-    // Очистка
+    // Очистка при завершении
     for (uint16_t i = 0; i < tnsr_count; i++) { 
         if (tnsrs[i].data) free(tnsrs[i].data); 
     }
     for (uint16_t i = 0; i < tt_count; i++) { 
-        if (t_tnsrs[i].data) free(t_tnsrs[i].data); 
         if (t_tnsrs[i].tensor_indices) free(t_tnsrs[i].tensor_indices);
     }
 
